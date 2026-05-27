@@ -139,6 +139,10 @@ def safe_filename(name):
     return cleaned or "uploaded.pdf"
 
 
+def raw_document_key(user_id, doc_id, filename):
+    return f"documents/raw/{user_id}/{doc_id}/{safe_filename(filename)}"
+
+
 def use_bedrock_ingestion():
     return (
         INGESTION_MODE == "bedrock"
@@ -424,7 +428,8 @@ def handle_upload(event):
         "SK": sk_doc(doc_id),
         "doc_id": doc_id,
         "title": title,
-        "s3_key": f"users/{user_id}/docs/{doc_id}.pdf",
+        "s3_key": raw_document_key(user_id, doc_id, title),
+        "raw_s3_key": raw_document_key(user_id, doc_id, title),
         "kb_status": "PROCESSING",
         "uploaded_at": uploaded_at,
         "page_count": 40,
@@ -445,7 +450,7 @@ def handle_upload_url(event):
     filename = safe_filename(payload.get("filename") or payload.get("title") or "uploaded.pdf")
     content_type = payload.get("content_type") or "application/octet-stream"
     doc_id = payload.get("doc_id") or f"doc_{uuid.uuid4().hex[:10]}"
-    s3_key = payload.get("s3_key") or f"documents/raw/{user_id}/{doc_id}/{filename}"
+    s3_key = raw_document_key(user_id, doc_id, filename)
 
     ensure_profile(user_id, f"{user_id}@studybot.com")
 
@@ -503,12 +508,10 @@ def handle_upload_complete(event, doc_id):
     ingestion_job_id = f"ing_{uuid.uuid4().hex[:10]}"
     ingestion_status = "IN_PROGRESS"
     if use_bedrock_ingestion():
-        try:
-            ingestion_job = start_kb_ingestion()
-            ingestion_job_id = ingestion_job.get("ingestionJobId", ingestion_job_id)
-            ingestion_status = str(ingestion_job.get("status", "STARTING")).upper()
-        except Exception as exc:
-            return response(500, {"message": "Failed to start Bedrock ingestion", "error": str(exc)})
+        # S3 upload completion only means the raw file exists. ProcessPdfLambda
+        # starts KB ingestion after it writes documents/processed/ text.
+        ingestion_job_id = ""
+        ingestion_status = "WAITING_FOR_PROCESSOR"
 
     updated["ingestion_job_id"] = ingestion_job_id
     updated["ingestion_status"] = ingestion_status
@@ -619,6 +622,13 @@ def normalize_doc_ids(payload):
     return out
 
 
+def normalize_quiz_count(value):
+    try:
+        return max(5, min(10, int(value or 5)))
+    except (TypeError, ValueError):
+        return 5
+
+
 def handle_ask(event):
     payload = parse_json_body(event)
     user_id = payload.get("user_id") or DEMO_USER_ID
@@ -643,35 +653,26 @@ def handle_ask(event):
     created_at = now_iso()
     topic = (primary_doc.get("concepts") or ["General"])[0]
     answer = (
-        "CAP theorem says that under network partition, a distributed system must trade between "
-        "consistency and availability."
+        "I do not have enough grounded context from the selected document chunks to answer this yet. "
+        "Try rephrasing the question or wait until document ingestion completes."
     )
-    citations = [
-        {
-            "document": primary_doc.get("title", "uploaded.pdf"),
-            "slide": 12,
-            "chunk_id": "chunk_034",
-        }
-    ]
+    citations = []
 
     if BEDROCK_KNOWLEDGE_BASE_ID:
-        try:
-            kb_result = ask_knowledge_base(
-                question=question,
-                knowledge_base_id=BEDROCK_KNOWLEDGE_BASE_ID,
-                doc_title=primary_doc.get("title", "uploaded.pdf"),
-                allowed_doc_ids=[item.get("doc_id") for item in selected_docs if item.get("doc_id")],
-                doc_titles_by_id={
-                    item.get("doc_id"): item.get("title", "uploaded.pdf")
-                    for item in selected_docs
-                    if item.get("doc_id")
-                },
-            )
-            answer = kb_result.get("answer") or answer
-            citations = kb_result.get("citations") or citations
-            topic = kb_result.get("topic") or topic
-        except Exception:
-            pass
+        kb_result = ask_knowledge_base(
+            question=question,
+            knowledge_base_id=BEDROCK_KNOWLEDGE_BASE_ID,
+            doc_title=primary_doc.get("title", "uploaded.pdf"),
+            allowed_doc_ids=[item.get("doc_id") for item in selected_docs if item.get("doc_id")],
+            doc_titles_by_id={
+                item.get("doc_id"): item.get("title", "uploaded.pdf")
+                for item in selected_docs
+                if item.get("doc_id")
+            },
+        )
+        answer = kb_result.get("answer") or answer
+        citations = kb_result.get("citations") or citations
+        topic = kb_result.get("topic") or topic
 
     TABLE.put_item(
         Item={
@@ -787,7 +788,7 @@ def handle_quiz(event):
                 fallback_concepts.append(concept)
     fallback_concepts = fallback_concepts[:10] or concepts_for(primary_doc.get("title"))
 
-    count = max(5, min(10, int(requested_count or 5)))
+    count = normalize_quiz_count(requested_count)
     if difficulty == "easy":
         count = max(5, min(count, 7))
     elif difficulty == "hard":

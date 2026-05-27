@@ -53,6 +53,7 @@ Resources:
           UPLOADS_BUCKET_NAME: studybotdatastack-uploadbucketd2c1da78-2cpeowy02vjk
           BEDROCK_KNOWLEDGE_BASE_ID: LI32IWLOB5
           BEDROCK_DATA_SOURCE_ID: V0ISBKEMXT
+          BEDROCK_GENERATION_MODEL_ID: global.amazon.nova-2-lite-v1:0
           VECTOR_INDEX_ARN: arn:aws:s3vectors:ap-southeast-1:589077667575:bucket/studybot-vectors-589077667575-ap-southeast-1/index/studybot-kb-index
           KB_PROCESSED_PREFIX: documents/processed
       Policies:
@@ -67,9 +68,16 @@ Resources:
               Action:
                 - bedrock:StartIngestionJob
                 - bedrock:GetIngestionJob
+                - bedrock:Retrieve
               Resource:
                 - arn:aws:bedrock:ap-southeast-1:589077667575:knowledge-base/LI32IWLOB5
                 - arn:aws:bedrock:ap-southeast-1:589077667575:knowledge-base/LI32IWLOB5/data-source/V0ISBKEMXT
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource:
+                - arn:aws:bedrock:ap-southeast-1:589077667575:inference-profile/global.amazon.nova-2-lite-v1:0
+                - arn:aws:bedrock:*::foundation-model/amazon.nova-2-lite-v1:0
       Events:
         LoginApi:
           Type: HttpApi

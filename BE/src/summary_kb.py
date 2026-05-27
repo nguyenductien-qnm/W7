@@ -1,3 +1,4 @@
+import json
 import os
 import re
 
@@ -5,9 +6,14 @@ import boto3
 
 
 AWS_REGION = os.environ.get("AWS_REGION", "ap-southeast-1")
+BEDROCK_GENERATION_MODEL_ID = os.environ.get(
+    "BEDROCK_GENERATION_MODEL_ID",
+    "global.amazon.nova-2-lite-v1:0",
+)
 SUMMARY_RETRIEVAL_RESULTS = int(os.environ.get("SUMMARY_RETRIEVAL_RESULTS", "20"))
 
 BEDROCK_AGENT_RUNTIME = boto3.client("bedrock-agent-runtime", region_name=AWS_REGION)
+BEDROCK_RUNTIME = boto3.client("bedrock-runtime", region_name=AWS_REGION)
 
 
 def _clean_text(value):
@@ -22,7 +28,7 @@ def _clean_text(value):
 def _extract_doc_id_from_uri(source_uri):
     uri = str(source_uri or "")
     patterns = [
-        r"/documents/[^/]+/(?P<doc_id>doc_[^/.]+)/",
+        r"/documents/raw/[^/]+/(?P<doc_id>doc_[^/.]+)/",
         r"/documents/processed/[^/]+/(?P<doc_id>doc_[^/.]+)\.txt",
     ]
     for pattern in patterns:
@@ -50,6 +56,7 @@ def _result_matches_doc_ids(result, allowed_doc_ids):
 
     allowed = {str(doc_id).strip().lower() for doc_id in allowed_doc_ids if str(doc_id).strip()}
     source_uri = str(_extract_source_uri(result) or "").lower()
+    canonical_uri = "/documents/raw/" in source_uri or "/documents/processed/" in source_uri
     doc_id_from_uri = _extract_doc_id_from_uri(source_uri).lower()
     if doc_id_from_uri and doc_id_from_uri in allowed:
         return True
@@ -64,78 +71,106 @@ def _result_matches_doc_ids(result, allowed_doc_ids):
     if meta_doc_id and meta_doc_id in allowed:
         return True
 
-    for doc_id in allowed:
-        if f"/{doc_id}/" in source_uri or f"/{doc_id}." in source_uri:
-            return True
-    return False
-
-
-def _extract_concepts(text, fallback):
-    candidates = [
-        "CAP theorem",
-        "Replication",
-        "Consistency model",
-        "Quorum",
-        "Partition tolerance",
-        "Eventual consistency",
-        "Leader election",
-        "Fault tolerance",
-        "Consensus",
-        "Distributed systems",
-    ]
-    found = []
-    lower_text = text.lower()
-    for concept in candidates:
-        if concept.lower() in lower_text and concept not in found:
-            found.append(concept)
-        if len(found) >= 5:
-            break
-    if found:
-        return found
-    return fallback[:5]
-
-
-def summarize_knowledge_base(question, knowledge_base_id, selected_doc_ids, fallback_concepts):
-    response_data = BEDROCK_AGENT_RUNTIME.retrieve(
-        knowledgeBaseId=knowledge_base_id,
-        retrievalQuery={"text": question},
-        retrievalConfiguration={
-            "vectorSearchConfiguration": {
-                "numberOfResults": SUMMARY_RETRIEVAL_RESULTS,
-            }
-        },
+    return canonical_uri and any(
+        f"/{doc_id}/" in source_uri or f"/{doc_id}." in source_uri for doc_id in allowed
     )
-    results = response_data.get("retrievalResults", []) or []
-    results = [item for item in results if _result_matches_doc_ids(item, selected_doc_ids or [])]
-    if not results:
-        return {
-            "summary": "No relevant chunks were found for the selected documents yet. Try again after ingestion completes.",
-            "testable_concepts": fallback_concepts[:5],
-        }
 
+
+def _context_from_results(results, limit=10, chars_per_chunk=850):
     snippets = []
     seen = set()
-    for result in results:
+    for idx, result in enumerate(results, start=1):
         text = _clean_text((result.get("content") or {}).get("text"))
-        if len(text) < 60:
+        if len(text) < 50:
             continue
-        key = text[:120].lower()
+        key = text[:160].lower()
         if key in seen:
             continue
         seen.add(key)
-        snippets.append(text[:380])
-        if len(snippets) >= 4:
+        snippets.append(f"[{idx}] {text[:chars_per_chunk]}")
+        if len(snippets) >= limit:
             break
+    return "\n\n".join(snippets)
 
-    if not snippets:
-        return {
-            "summary": "Selected documents were retrieved but usable text is still too sparse.",
-            "testable_concepts": fallback_concepts[:5],
-        }
 
-    summary = (
-        "Summary from selected documents:\n\n"
-        + "\n\n".join(f"- {snippet}" for snippet in snippets[:3])
+def _invoke_text_model(prompt, max_tokens=900, temperature=0.2):
+    body = {
+        "messages": [{"role": "user", "content": [{"text": prompt}]}],
+        "inferenceConfig": {
+            "maxTokens": max_tokens,
+            "temperature": temperature,
+            "topP": 0.9,
+        },
+    }
+    response = BEDROCK_RUNTIME.invoke_model(
+        modelId=BEDROCK_GENERATION_MODEL_ID,
+        contentType="application/json",
+        accept="application/json",
+        body=json.dumps(body),
     )
-    concepts = _extract_concepts(" ".join(snippets), fallback_concepts)
-    return {"summary": summary, "testable_concepts": concepts[:5]}
+    payload = json.loads(response["body"].read().decode("utf-8"))
+    content = (((payload.get("output") or {}).get("message") or {}).get("content") or [])
+    if content and isinstance(content, list):
+        return "\n".join(part.get("text", "") for part in content if isinstance(part, dict)).strip()
+    return str(payload.get("outputText") or payload.get("completion") or "").strip()
+
+
+def _extract_json_object(text):
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    match = re.search(r"\{.*\}", text or "", flags=re.DOTALL)
+    if not match:
+        return {}
+    try:
+        return json.loads(match.group(0))
+    except Exception:
+        return {}
+
+
+def summarize_knowledge_base(question, knowledge_base_id, selected_doc_ids, fallback_concepts):
+    try:
+        response_data = BEDROCK_AGENT_RUNTIME.retrieve(
+            knowledgeBaseId=knowledge_base_id,
+            retrievalQuery={"text": question},
+            retrievalConfiguration={
+                "vectorSearchConfiguration": {
+                    "numberOfResults": SUMMARY_RETRIEVAL_RESULTS,
+                }
+            },
+        )
+    except Exception:
+        return {}
+
+    results = response_data.get("retrievalResults", []) or []
+    results = [item for item in results if _result_matches_doc_ids(item, selected_doc_ids or [])]
+    context = _context_from_results(results)
+    if not context:
+        return {}
+
+    prompt = (
+        "Create a concise study summary from only the grounded context. "
+        "Return strict JSON with keys summary and testable_concepts. "
+        "summary should be 2-4 short paragraphs, not copied snippets. "
+        "testable_concepts must be 3-5 short strings. "
+        "If the context is insufficient, keep the summary honest about that.\n\n"
+        f"Grounded context:\n{context}\n\n"
+        "JSON:"
+    )
+    try:
+        generated = _invoke_text_model(prompt)
+    except Exception:
+        return {}
+
+    data = _extract_json_object(generated)
+    summary = str(data.get("summary") or "").strip()
+    concepts = data.get("testable_concepts") or fallback_concepts
+    if not isinstance(concepts, list):
+        concepts = fallback_concepts
+    concepts = [str(item).strip() for item in concepts if str(item).strip()]
+
+    return {
+        "summary": summary,
+        "testable_concepts": (concepts or fallback_concepts)[:5],
+    }

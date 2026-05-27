@@ -495,7 +495,7 @@ export default function App() {
               <span>File is uploaded to S3, then processed for knowledge retrieval.</span>
               <input
                 type="file"
-                accept=".pdf,.txt,.md"
+                accept=".pdf,.docx,.pptx,.txt,.md,.markdown,.vtt"
                 disabled={busy.upload}
                 onChange={(e) => {
                   const file = e.target.files?.[0];

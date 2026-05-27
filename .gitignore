@@ -9,3 +9,4 @@ infra/cdk.out/
 .cdk/
 Library/
 studybot/
+sample_data/

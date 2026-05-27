@@ -1,24 +1,27 @@
+import json
 import os
 import re
-from urllib.parse import unquote_plus
-from urllib.parse import urlparse
+from urllib.parse import unquote_plus, urlparse
 
 import boto3
 
 
 AWS_REGION = os.environ.get("AWS_REGION", "ap-southeast-1")
+BEDROCK_GENERATION_MODEL_ID = os.environ.get(
+    "BEDROCK_GENERATION_MODEL_ID",
+    "global.amazon.nova-2-lite-v1:0",
+)
 QA_RETRIEVAL_RESULTS = int(os.environ.get("QA_RETRIEVAL_RESULTS", "20"))
 
 BEDROCK_AGENT_RUNTIME = boto3.client("bedrock-agent-runtime", region_name=AWS_REGION)
+BEDROCK_RUNTIME = boto3.client("bedrock-runtime", region_name=AWS_REGION)
 
 
-def _normalize_text(value):
+def _clean_text(value):
     text = unquote_plus(str(value or ""))
     text = re.sub(r"https?://\S+", " ", text, flags=re.IGNORECASE)
     text = re.sub(r"\b[a-z0-9_.-]{25,}\b", " ", text, flags=re.IGNORECASE)
     text = re.sub(r"\b\S*[%=&]\S*\b", " ", text)
-    text = re.sub(r"\b\S*tls\S*\b", " ", text, flags=re.IGNORECASE)
-    text = re.sub(r"\b\S*mongosh\S*\b", " ", text, flags=re.IGNORECASE)
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
@@ -26,7 +29,7 @@ def _normalize_text(value):
 def _extract_doc_id_from_uri(source_uri):
     uri = str(source_uri or "")
     patterns = [
-        r"/documents/[^/]+/(?P<doc_id>doc_[^/.]+)/",
+        r"/documents/raw/[^/]+/(?P<doc_id>doc_[^/.]+)/",
         r"/documents/processed/[^/]+/(?P<doc_id>doc_[^/.]+)\.txt",
     ]
     for pattern in patterns:
@@ -43,7 +46,6 @@ def _extract_source_uri(result):
         return s3_location.get("uri")
 
     metadata = result.get("metadata") or {}
-    # Common metadata keys from Bedrock KB ingestion
     for key in ("x-amz-bedrock-kb-source-uri", "source_uri", "source"):
         if metadata.get(key):
             return str(metadata.get(key))
@@ -60,8 +62,6 @@ def _extract_document_name(source_uri, fallback, doc_titles_by_id=None):
         return fallback
     parsed = urlparse(source_uri)
     name = os.path.basename(parsed.path or "").strip()
-    if name.startswith("doc_") and name.endswith(".txt") and extracted_doc_id and doc_titles_by_id.get(extracted_doc_id):
-        return doc_titles_by_id[extracted_doc_id]
     return name or fallback
 
 
@@ -97,52 +97,75 @@ def _result_matches_doc_ids(result, allowed_doc_ids):
     metadata = result.get("metadata") or {}
     source_uri = str(_extract_source_uri(result) or "").lower()
     allowed = {str(doc_id).lower() for doc_id in allowed_doc_ids if str(doc_id).strip()}
+    canonical_uri = "/documents/raw/" in source_uri or "/documents/processed/" in source_uri
 
-    # Match by source URI patterns from our ingestion flow:
-    # - documents/{user_id}/{doc_id}/{filename}
-    # - documents/processed/{user_id}/{doc_id}.txt
-    for doc_id in allowed:
-        if f"/{doc_id}/" in source_uri or f"/{doc_id}." in source_uri:
-            return True
+    if canonical_uri:
+        for doc_id in allowed:
+            if f"/{doc_id}/" in source_uri or f"/{doc_id}." in source_uri:
+                return True
 
-    # Optional metadata keys if present.
     meta_doc_id = str(
         metadata.get("doc_id")
         or metadata.get("document_id")
         or metadata.get("source_doc_id")
         or ""
     ).lower()
-    if meta_doc_id and meta_doc_id in allowed:
-        return True
-
-    return False
+    return bool(meta_doc_id and meta_doc_id in allowed)
 
 
 def _fallback_answer(question, doc_title):
     return (
-        f"I could not find grounded chunks in Knowledge Base for your question: '{question}'. "
-        f"Please try rephrasing or wait until document '{doc_title}' finishes ingestion."
+        "I do not have enough grounded context from the selected document chunks "
+        f"to answer '{question}'. Try rephrasing the question or wait until "
+        f"'{doc_title}' finishes ingestion."
     )
 
 
-def _select_useful_snippets(results, limit=2):
+def _context_from_results(results, limit=8, chars_per_chunk=900):
     snippets = []
     seen = set()
-    for result in results:
-        raw_text = (result.get("content") or {}).get("text")
-        cleaned = _normalize_text(raw_text)
-        if not cleaned:
+    for idx, result in enumerate(results, start=1):
+        text = _clean_text((result.get("content") or {}).get("text"))
+        if len(text) < 40:
             continue
-        if len(cleaned) < 50:
-            continue
-        key = cleaned[:120].lower()
+        key = text[:160].lower()
         if key in seen:
             continue
         seen.add(key)
-        snippets.append(cleaned[:420])
+        snippets.append(f"[{idx}] {text[:chars_per_chunk]}")
         if len(snippets) >= limit:
             break
-    return snippets
+    return "\n\n".join(snippets)
+
+
+def _extract_model_text(payload):
+    content = (((payload.get("output") or {}).get("message") or {}).get("content") or [])
+    if content and isinstance(content, list):
+        return "\n".join(part.get("text", "") for part in content if isinstance(part, dict)).strip()
+    if payload.get("outputText"):
+        return str(payload.get("outputText")).strip()
+    if payload.get("completion"):
+        return str(payload.get("completion")).strip()
+    return ""
+
+
+def _invoke_text_model(prompt, max_tokens=900, temperature=0.1):
+    body = {
+        "messages": [{"role": "user", "content": [{"text": prompt}]}],
+        "inferenceConfig": {
+            "maxTokens": max_tokens,
+            "temperature": temperature,
+            "topP": 0.9,
+        },
+    }
+    response = BEDROCK_RUNTIME.invoke_model(
+        modelId=BEDROCK_GENERATION_MODEL_ID,
+        contentType="application/json",
+        accept="application/json",
+        body=json.dumps(body),
+    )
+    payload = json.loads(response["body"].read().decode("utf-8"))
+    return _extract_model_text(payload)
 
 
 def ask_knowledge_base(
@@ -155,42 +178,50 @@ def ask_knowledge_base(
     allowed_doc_ids = allowed_doc_ids or []
     doc_titles_by_id = doc_titles_by_id or {}
 
-    response_data = BEDROCK_AGENT_RUNTIME.retrieve(
-        knowledgeBaseId=knowledge_base_id,
-        retrievalQuery={"text": question},
-        retrievalConfiguration={
-            "vectorSearchConfiguration": {
-                "numberOfResults": QA_RETRIEVAL_RESULTS,
-            }
-        },
-    )
-    results = response_data.get("retrievalResults", []) or []
-    results = [item for item in results if _result_matches_doc_ids(item, allowed_doc_ids or [])]
-    if not results:
+    try:
+        response_data = BEDROCK_AGENT_RUNTIME.retrieve(
+            knowledgeBaseId=knowledge_base_id,
+            retrievalQuery={"text": question},
+            retrievalConfiguration={
+                "vectorSearchConfiguration": {
+                    "numberOfResults": QA_RETRIEVAL_RESULTS,
+                }
+            },
+        )
+    except Exception:
         return {
             "answer": _fallback_answer(question, doc_title),
             "citations": [],
             "topic": "General",
         }
 
-    citations = []
-    for result in results[:3]:
-        citations.append(_to_citation(result, doc_title, doc_titles_by_id))
+    results = response_data.get("retrievalResults", []) or []
+    results = [item for item in results if _result_matches_doc_ids(item, allowed_doc_ids)]
+    citations = [_to_citation(result, doc_title, doc_titles_by_id) for result in results[:4]]
+    context = _context_from_results(results)
 
-    snippets = _select_useful_snippets(results, limit=2)
-
-    if not snippets:
+    if not context:
         return {
             "answer": _fallback_answer(question, doc_title),
             "citations": citations,
             "topic": "General",
         }
 
-    answer = "Từ các tài liệu bạn đã chọn, câu trả lời bám theo nội dung như sau:\n\n" + "\n\n".join(
-        f"- {snippet}" for snippet in snippets
+    prompt = (
+        "Answer the student's question using only the grounded context below. "
+        "If the context is insufficient, say that there is not enough grounded context. "
+        "Be concise, specific, and cite chunk numbers in brackets when useful.\n\n"
+        f"Question: {question}\n\n"
+        f"Grounded context:\n{context}\n\n"
+        "Answer:"
     )
+    try:
+        answer = _invoke_text_model(prompt)
+    except Exception:
+        answer = _fallback_answer(question, doc_title)
+
     return {
-        "answer": answer,
+        "answer": answer or _fallback_answer(question, doc_title),
         "citations": citations,
-        "topic": citations[0].get("document") or "General",
+        "topic": citations[0].get("document") if citations else "General",
     }

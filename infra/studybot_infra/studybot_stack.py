@@ -26,6 +26,7 @@ class StudyBotInfraStack(Stack):
         )
         knowledge_base_id = "LI32IWLOB5"
         data_source_id = "V0ISBKEMXT"
+        generation_model_id = "global.amazon.nova-2-lite-v1:0"
         kb_arn = (
             "arn:aws:bedrock:ap-southeast-1:589077667575:"
             f"knowledge-base/{knowledge_base_id}"
@@ -33,6 +34,14 @@ class StudyBotInfraStack(Stack):
         data_source_arn = (
             "arn:aws:bedrock:ap-southeast-1:589077667575:"
             f"knowledge-base/{knowledge_base_id}/data-source/{data_source_id}"
+        )
+        generation_profile_arn = (
+            "arn:aws:bedrock:*::"
+            "foundation-model/amazon.nova-2-lite-v1:0"
+        )
+        generation_model_arn = (
+            "arn:aws:bedrock:ap-southeast-1:589077667575:"
+            f"inference-profile/{generation_model_id}"
         )
 
         uploads_bucket = s3.Bucket.from_bucket_name(
@@ -86,6 +95,7 @@ class StudyBotInfraStack(Stack):
                 "UPLOADS_BUCKET_NAME": uploads_bucket_name,
                 "BEDROCK_KNOWLEDGE_BASE_ID": knowledge_base_id,
                 "BEDROCK_DATA_SOURCE_ID": data_source_id,
+                "BEDROCK_GENERATION_MODEL_ID": generation_model_id,
                 "VECTOR_INDEX_ARN": vector_index_arn,
             },
         )
@@ -120,7 +130,13 @@ class StudyBotInfraStack(Stack):
                     "bedrock:GetIngestionJob",
                     "bedrock:Retrieve",
                 ],
-                resources=["*", kb_arn, data_source_arn],
+                resources=[kb_arn, data_source_arn],
+            )
+        )
+        api_lambda.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["bedrock:InvokeModel"],
+                resources=[generation_model_arn, generation_profile_arn],
             )
         )
         process_pdf_lambda.add_to_role_policy(
@@ -139,7 +155,7 @@ class StudyBotInfraStack(Stack):
             )
         )
 
-        for suffix in [".pdf", ".docx", ".md", ".markdown", ".txt", ".pptx"]:
+        for suffix in [".pdf", ".docx", ".md", ".markdown", ".txt", ".pptx", ".vtt"]:
             uploads_bucket.add_event_notification(
                 s3.EventType.OBJECT_CREATED,
                 s3n.LambdaDestination(process_pdf_lambda),

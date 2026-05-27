@@ -6,6 +6,7 @@
     "UPLOADS_BUCKET_NAME": "studybotdatastack-uploadbucketd2c1da78-2cpeowy02vjk",
     "BEDROCK_KNOWLEDGE_BASE_ID": "LI32IWLOB5",
     "BEDROCK_DATA_SOURCE_ID": "V0ISBKEMXT",
+    "BEDROCK_GENERATION_MODEL_ID": "global.amazon.nova-2-lite-v1:0",
     "VECTOR_INDEX_ARN": "arn:aws:s3vectors:ap-southeast-1:589077667575:bucket/studybot-vectors-589077667575-ap-southeast-1/index/studybot-kb-index",
     "INFRA_STACK_ARN": "arn:aws:cloudformation:ap-southeast-1:589077667575:stack/StudyBotInfraStack/be19ceb0-5989-11f1-bd2a-0a652b07efbb",
     "KB_PROCESSED_PREFIX": "documents/processed"

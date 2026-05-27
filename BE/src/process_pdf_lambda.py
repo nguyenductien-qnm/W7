@@ -40,7 +40,7 @@ BEDROCK_KNOWLEDGE_BASE_ID = os.environ.get("BEDROCK_KNOWLEDGE_BASE_ID", "")
 BEDROCK_DATA_SOURCE_ID = os.environ.get("BEDROCK_DATA_SOURCE_ID", "")
 KB_PROCESSED_PREFIX = os.environ.get("KB_PROCESSED_PREFIX", "documents/processed")
 USE_TEXTRACT_FALLBACK = os.environ.get("USE_TEXTRACT_FALLBACK", "true").lower() == "true"
-SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".md", ".markdown", ".txt", ".pptx"}
+SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".md", ".markdown", ".txt", ".pptx", ".vtt"}
 
 
 s3 = boto3.client("s3", region_name=AWS_REGION)
@@ -139,6 +139,85 @@ def decode_text_bytes(file_bytes):
 def extract_plain_text(file_bytes):
     text = decode_text_bytes(file_bytes).strip()
     return {"ok": bool(text), "text": text}
+
+
+def is_vtt_timestamp(value):
+    return bool(
+        re.match(
+            r"^\d{2}:\d{2}:\d{2}\.\d{3}\s+-->\s+\d{2}:\d{2}:\d{2}\.\d{3}",
+            value or "",
+        )
+    )
+
+
+def strip_vtt_markup(value):
+    text = re.sub(r"<[^>]+>", "", value or "")
+    text = re.sub(r"&nbsp;", " ", text)
+    text = re.sub(r"&amp;", "&", text)
+    text = re.sub(r"&lt;", "<", text)
+    text = re.sub(r"&gt;", ">", text)
+    return " ".join(text.split()).strip()
+
+
+def extract_vtt_text(file_bytes):
+    raw_text = decode_text_bytes(file_bytes)
+    lines = raw_text.replace("\ufeff", "").splitlines()
+
+    cues = []
+    pending_time = ""
+    pending_text = []
+    seen_consecutive = set()
+
+    def flush():
+        nonlocal pending_time, pending_text, seen_consecutive
+        if not pending_time:
+            pending_text = []
+            return
+
+        cue_text = " ".join(item for item in pending_text if item).strip()
+        if cue_text:
+            start_time = pending_time.split("-->", 1)[0].strip()
+            key = cue_text.lower()
+            if key not in seen_consecutive:
+                cues.append(f"[{start_time}] {cue_text}")
+            seen_consecutive = {key}
+
+        pending_time = ""
+        pending_text = []
+
+    skip_block = False
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            flush()
+            skip_block = False
+            continue
+
+        if line.upper() == "WEBVTT":
+            continue
+        if line.startswith(("NOTE", "STYLE", "REGION")):
+            skip_block = True
+            continue
+        if skip_block:
+            continue
+
+        if is_vtt_timestamp(line):
+            flush()
+            pending_time = line
+            continue
+
+        if not pending_time:
+            # Cue identifier.
+            continue
+
+        cleaned = strip_vtt_markup(line)
+        if cleaned:
+            pending_text.append(cleaned)
+
+    flush()
+
+    text = "\n".join(cues).strip()
+    return {"ok": bool(text), "text": text, "cue_count": len(cues), "mode": "webvtt"}
 
 
 def iter_docx_table_text(table):
@@ -319,6 +398,8 @@ def extract_document_text(file_bytes, filename, bucket, key):
     elif extension in {".txt", ".md", ".markdown"}:
         extraction = extract_plain_text(file_bytes)
         extraction["mode"] = extension.lstrip(".")
+    elif extension == ".vtt":
+        extraction = extract_vtt_text(file_bytes)
     elif extension == ".docx":
         extraction = extract_docx_text(file_bytes)
     elif extension == ".pptx":
@@ -470,24 +551,48 @@ def process_record(record):
 
     processed_upload = upload_processed_text(bucket, user_id, doc_id, text)
     processed_key = processed_upload["key"]
-    ingestion_job = start_kb_ingestion()
+    processed_attrs = {
+        "extraction_mode": extraction_mode,
+        "file_type": extraction.get("file_type", extension.lstrip(".")),
+        "page_count": extraction.get("page_count", 0),
+        "slide_count": extraction.get("slide_count", 0),
+        "cue_count": extraction.get("cue_count", 0),
+        "processed_text_size_bytes": processed_upload["size_bytes"],
+        "processed_s3_prefix": processed_upload["prefix"],
+        "raw_s3_key": key,
+        "processed_s3_key": processed_key,
+        "processed_text_s3_key": processed_key,
+        "processed_at": now_iso(),
+    }
+
+    update_doc(user_id, doc_id, kb_status="PROCESSING", ingestion_status="STARTING", **processed_attrs)
+
+    try:
+        ingestion_job = start_kb_ingestion()
+    except Exception as exc:
+        update_doc(
+            user_id,
+            doc_id,
+            kb_status="FAILED",
+            ingestion_status="START_FAILED",
+            failure_reason=f"ingestion_start_failed: {exc}",
+            **processed_attrs,
+        )
+        return {
+            "doc_id": doc_id,
+            "status": "FAILED",
+            "reason": "ingestion_start_failed",
+            "processed_text_s3_key": processed_key,
+            "error": str(exc),
+        }
 
     update_doc(
         user_id,
         doc_id,
         kb_status="PROCESSING",
-        extraction_mode=extraction_mode,
-        file_type=extraction.get("file_type", extension.lstrip(".")),
-        page_count=extraction.get("page_count", 0),
-        slide_count=extraction.get("slide_count", 0),
-        processed_text_size_bytes=processed_upload["size_bytes"],
-        processed_s3_prefix=processed_upload["prefix"],
-        raw_s3_key=key,
-        processed_s3_key=processed_key,
-        processed_text_s3_key=processed_key,
         ingestion_job_id=ingestion_job.get("ingestionJobId", ""),
         ingestion_status=ingestion_job.get("status", "STARTING"),
-        processed_at=now_iso(),
+        **processed_attrs,
     )
 
     return {
