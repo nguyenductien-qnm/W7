@@ -1,13 +1,8 @@
 .aws-sam/
 __pycache__/
 *.pyc
-
-.venv312/
-.venv/
-.env
-
+/.venv
 infra/.venv/
 infra/cdk.out/
-
 .pytest_cache/
 *.egg-info/
