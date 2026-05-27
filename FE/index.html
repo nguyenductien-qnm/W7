@@ -179,7 +179,8 @@ button:disabled { opacity: .55; cursor: not-allowed; }
   <div class="auth">
     <span class="pill" id="backend-pill">Checking API</span>
     <span class="pill" id="user-pill">Local user</span>
-    <button class="secondary" id="login-btn" onclick="login()">Log in</button>
+    <input id="login-email" type="email" placeholder="demo@studybot.com" style="max-width:220px;">
+    <button class="secondary" id="login-btn" onclick="login()">Fake Login</button>
     <button class="secondary" id="logout-btn" onclick="logout()" hidden>Log out</button>
   </div>
 </header>
@@ -259,10 +260,12 @@ let selectedDocId = null;
 function $(id) { return document.getElementById(id); }
 function authState() {
   return {
-    idToken: sessionStorage.getItem('studybot_id_token') || '',
-    accessToken: sessionStorage.getItem('studybot_access_token') || '',
+    userId: sessionStorage.getItem('studybot_user_id') || '',
     email: sessionStorage.getItem('studybot_email') || ''
   };
+}
+function getCurrentUserId() {
+  return authState().userId || LOCAL_USER;
 }
 function setBusy(id, busy) { const el = $(id); if (el) el.disabled = busy; }
 function log(label, body) {
@@ -277,9 +280,7 @@ function escapeHtml(s) {
 }
 function headers(json = false) {
   const h = {};
-  const token = authState().idToken;
-  if (token) h.Authorization = `Bearer ${token}`;
-  else h['X-User-Id'] = LOCAL_USER;
+  h['X-User-Id'] = getCurrentUserId();
   if (json) h['Content-Type'] = 'application/json';
   return h;
 }
@@ -297,78 +298,38 @@ async function call(path, opts = {}) {
   if (!res.ok) throw new Error(body.detail || body.message || `HTTP ${res.status}`);
   return body;
 }
-function base64Url(bytes) {
-  return btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-async function sha256(text) {
-  return crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
-}
-function parseJwt(token) {
-  try { return JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))); }
-  catch { return {}; }
-}
 async function login() {
-  if (!CONFIG.cognitoDomain || !CONFIG.clientId) return;
-  const verifier = base64Url(crypto.getRandomValues(new Uint8Array(32)));
-  sessionStorage.setItem('studybot_pkce_verifier', verifier);
-  const challenge = base64Url(await sha256(verifier));
-  const redirect = CONFIG.redirectUri || location.origin + location.pathname;
-  const params = new URLSearchParams({
-    client_id: CONFIG.clientId,
-    response_type: 'code',
-    scope: 'openid email profile',
-    redirect_uri: redirect,
-    code_challenge_method: 'S256',
-    code_challenge: challenge
-  });
-  location.href = `${CONFIG.cognitoDomain}/oauth2/authorize?${params}`;
-}
-async function finishLogin() {
-  const params = new URLSearchParams(location.search);
-  const code = params.get('code');
-  if (!code || !CONFIG.cognitoDomain || !CONFIG.clientId) return;
-  const verifier = sessionStorage.getItem('studybot_pkce_verifier');
-  const redirect = CONFIG.redirectUri || location.origin + location.pathname;
-  const body = new URLSearchParams({
-    grant_type: 'authorization_code',
-    client_id: CONFIG.clientId,
-    code,
-    redirect_uri: redirect,
-    code_verifier: verifier || ''
-  });
-  const res = await fetch(`${CONFIG.cognitoDomain}/oauth2/token`, {
-    method: 'POST',
-    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-    body
-  });
-  const tokens = await res.json();
-  log('Cognito token exchange', tokens.error ? tokens : {ok: true});
-  if (tokens.id_token) {
-    sessionStorage.setItem('studybot_id_token', tokens.id_token);
-    sessionStorage.setItem('studybot_access_token', tokens.access_token || '');
-    const claims = parseJwt(tokens.id_token);
-    sessionStorage.setItem('studybot_email', claims.email || claims.sub || 'signed in');
-    history.replaceState({}, document.title, location.pathname);
+  const email = $('login-email').value.trim().toLowerCase();
+  if (!email) {
+    renderResult('upload-result', 'Please enter email to login.', 'warn');
+    return;
+  }
+  setBusy('login-btn', true);
+  try {
+    const body = await call('/login', {method: 'POST', json: {email}});
+    sessionStorage.setItem('studybot_user_id', body.user_id || LOCAL_USER);
+    sessionStorage.setItem('studybot_email', email);
+    updateAuthUi();
+    await refreshDocs();
+  } catch (err) {
+    renderResult('upload-result', `Login failed: ${err.message}`, 'warn');
+  } finally {
+    setBusy('login-btn', false);
   }
 }
 function logout() {
-  sessionStorage.clear();
-  if (CONFIG.cognitoDomain && CONFIG.clientId) {
-    const params = new URLSearchParams({
-      client_id: CONFIG.clientId,
-      logout_uri: CONFIG.logoutUri || location.origin + location.pathname
-    });
-    location.href = `${CONFIG.cognitoDomain}/logout?${params}`;
-  } else {
-    updateAuthUi();
-  }
+  sessionStorage.removeItem('studybot_user_id');
+  sessionStorage.removeItem('studybot_email');
+  updateAuthUi();
 }
 function updateAuthUi() {
   const state = authState();
-  const configured = !!(CONFIG.cognitoDomain && CONFIG.clientId);
-  $('login-btn').hidden = !configured || !!state.idToken;
-  $('logout-btn').hidden = !state.idToken;
-  $('user-pill').textContent = state.idToken ? state.email : `Local: ${LOCAL_USER}`;
+  const loggedIn = !!state.userId;
+  $('login-btn').hidden = loggedIn;
+  $('logout-btn').hidden = !loggedIn;
+  $('login-email').hidden = loggedIn;
+  $('login-email').value = state.email || '';
+  $('user-pill').textContent = loggedIn ? `${state.email} (${state.userId})` : `Local: ${LOCAL_USER}`;
 }
 async function loadStatus() {
   try {
@@ -390,32 +351,99 @@ $('file').addEventListener('change', e => { if (e.target.files[0]) upload(e.targ
 async function upload(file) {
   renderResult('upload-result', `Uploading ${file.name}...`, 'warn');
   try {
-    if (authState().idToken && CONFIG.apiBase) {
-      try {
-        const intent = await call('/documents/upload-url', {
-          method: 'POST',
-          json: {filename: file.name, content_type: file.type || 'application/octet-stream', size: file.size}
-        });
-        const put = await fetch(intent.upload_url, {method: 'PUT', headers: {'Content-Type': file.type || 'application/octet-stream'}, body: file});
-        log(`PUT S3 ${intent.s3_key}`, {status: put.status, ok: put.ok});
-        if (!put.ok) throw new Error(`S3 upload failed: HTTP ${put.status}`);
-        const complete = await call(`/documents/${intent.doc_id}/complete`, {method: 'POST'});
-        renderResult('upload-result', `${file.name} uploaded. Ingestion job: ${complete.ingestion_job_id}`, 'ok');
-        selectedDocId = intent.doc_id;
-      } catch (presignedErr) {
-        log('Presigned upload fallback', {error: presignedErr.message});
-        const body = await directUpload(file);
-        renderResult('upload-result', `${body.filename} uploaded through API fallback.`, 'ok');
-        selectedDocId = body.doc_id;
-      }
+    const intent = await requestUploadIntent(file);
+    if (intent) {
+      await uploadWithPresignedUrl(intent, file);
+      const complete = await maybeCompleteUpload(intent);
+      const message = complete?.ingestion_job_id
+        ? `${file.name} uploaded. Ingestion job: ${complete.ingestion_job_id}`
+        : `${file.name} uploaded to S3 successfully.`;
+      renderResult('upload-result', message, 'ok');
+      selectedDocId = intent.doc_id || selectedDocId;
     } else {
       const body = await directUpload(file);
-      renderResult('upload-result', `${body.filename} uploaded and indexed locally.`, 'ok');
-      selectedDocId = body.doc_id;
+      renderResult('upload-result', `${body.filename || file.name} uploaded through API.`, 'ok');
+      selectedDocId = body.doc_id || selectedDocId;
     }
     await refreshDocs();
   } catch (err) {
     renderResult('upload-result', err.message, 'warn');
+  }
+}
+function extractUploadUrl(intent) {
+  return intent.upload_url || intent.presigned_url || intent.url || '';
+}
+function extractUploadMethod(intent) {
+  return String(intent.upload_method || intent.method || 'PUT').toUpperCase();
+}
+function extractCompletePath(intent) {
+  if (intent.complete_path) return intent.complete_path;
+  if (intent.complete_url) return intent.complete_url;
+  if (intent.doc_id) return `/documents/${intent.doc_id}/complete`;
+  return '';
+}
+async function requestUploadIntent(file) {
+  const payload = {
+    filename: file.name,
+    title: file.name,
+    content_type: file.type || 'application/octet-stream',
+    size: file.size,
+    user_id: getCurrentUserId()
+  };
+  const endpoints = ['/documents/upload-url', '/upload/presign'];
+  for (const path of endpoints) {
+    try {
+      const body = await call(path, {method: 'POST', json: payload});
+      const uploadUrl = extractUploadUrl(body || {});
+      if (uploadUrl) return body;
+      log(`Presign not returned from ${path}`, body);
+    } catch (err) {
+      log(`Presign request failed ${path}`, {error: err.message});
+    }
+  }
+  return null;
+}
+async function uploadWithPresignedUrl(intent, file) {
+  const uploadUrl = extractUploadUrl(intent);
+  if (!uploadUrl) throw new Error('Missing presigned upload URL.');
+  const method = extractUploadMethod(intent);
+  if (method === 'POST' && intent.fields && typeof intent.fields === 'object') {
+    const form = new FormData();
+    Object.entries(intent.fields).forEach(([k, v]) => form.append(k, v));
+    form.append('file', file);
+    const res = await fetch(uploadUrl, {method: 'POST', body: form});
+    log(`POST S3 ${intent.s3_key || uploadUrl}`, {status: res.status, ok: res.ok});
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`S3 POST failed: HTTP ${res.status} ${body.slice(0, 200)}`);
+    }
+    return;
+  }
+  const headers = {'Content-Type': file.type || 'application/octet-stream', ...(intent.headers || {})};
+  const res = await fetch(uploadUrl, {method: 'PUT', headers, body: file});
+  log(`PUT S3 ${intent.s3_key || uploadUrl}`, {status: res.status, ok: res.ok});
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`S3 PUT failed: HTTP ${res.status} ${body.slice(0, 200)}`);
+  }
+}
+async function maybeCompleteUpload(intent) {
+  const completePath = extractCompletePath(intent);
+  if (!completePath) return null;
+  try {
+    if (completePath.startsWith('http://') || completePath.startsWith('https://')) {
+      const res = await fetch(completePath, {method: 'POST', headers: headers(true), body: JSON.stringify({doc_id: intent.doc_id, s3_key: intent.s3_key})});
+      const text = await res.text();
+      let body;
+      try { body = JSON.parse(text); } catch { body = {raw: text}; }
+      log(`POST complete ${completePath}`, body);
+      if (!res.ok) throw new Error(body.detail || body.message || `HTTP ${res.status}`);
+      return body;
+    }
+    return await call(completePath, {method: 'POST', json: {doc_id: intent.doc_id, s3_key: intent.s3_key}});
+  } catch (err) {
+    log('Complete upload skipped', {error: err.message});
+    return null;
   }
 }
 async function directUpload(file) {
@@ -522,7 +550,6 @@ function renderCitations(citations = []) {
 }
 $('question').addEventListener('keydown', e => { if (e.key === 'Enter') ask(); });
 (async function boot() {
-  await finishLogin();
   updateAuthUi();
   await loadStatus();
   await refreshDocs();

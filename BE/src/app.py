@@ -3,22 +3,26 @@ import json
 import os
 import re
 import time
+import uuid
 from datetime import datetime, timezone
 from email import policy
 from email.parser import BytesParser
 
 import boto3
-from boto3.dynamodb.conditions import Key
+from boto3.dynamodb.conditions import Attr, Key
 
 
-DEMO_EMAILS = {"demo@studybot.com", "demo@studybot.ai"}
-DEMO_PASSWORD = "123456"
 DEMO_USER_ID = "demo"
 READY_AFTER_SECONDS = 4
 
 TABLE_NAME = os.environ.get("DOCUMENTS_TABLE", "StudyBotDocuments")
 AWS_REGION = os.environ.get("AWS_REGION", "ap-southeast-1")
 DDB_ENDPOINT_URL = os.environ.get("DDB_ENDPOINT_URL")
+UPLOADS_BUCKET_NAME = os.environ.get("UPLOADS_BUCKET_NAME", "")
+BEDROCK_KNOWLEDGE_BASE_ID = os.environ.get("BEDROCK_KNOWLEDGE_BASE_ID", "")
+BEDROCK_DATA_SOURCE_ID = os.environ.get("BEDROCK_DATA_SOURCE_ID", "")
+VECTOR_INDEX_ARN = os.environ.get("VECTOR_INDEX_ARN", "")
+INGESTION_MODE = os.environ.get("INGESTION_MODE", "mock").lower()
 
 
 def _dynamodb_resource():
@@ -33,6 +37,19 @@ def _dynamodb_resource():
 TABLE = _dynamodb_resource().Table(TABLE_NAME)
 
 
+def _s3_client():
+    kwargs = {"region_name": AWS_REGION}
+    if DDB_ENDPOINT_URL:
+        # Keep local override behavior consistent when custom credentials are injected.
+        kwargs["aws_access_key_id"] = os.environ.get("AWS_ACCESS_KEY_ID", "dummy")
+        kwargs["aws_secret_access_key"] = os.environ.get("AWS_SECRET_ACCESS_KEY", "dummy")
+    return boto3.client("s3", **kwargs)
+
+
+S3 = _s3_client()
+BEDROCK_AGENT = boto3.client("bedrock-agent", region_name=AWS_REGION)
+
+
 def now_epoch():
     return int(time.time())
 
@@ -44,7 +61,7 @@ def now_iso():
 def cors_headers():
     return {
         "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "Content-Type,Authorization",
+        "Access-Control-Allow-Headers": "Content-Type,Authorization,X-User-Id",
         "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
     }
 
@@ -96,6 +113,99 @@ def parse_upload_body(event):
             user_id = (part.get_content() or "").strip() or DEMO_USER_ID
 
     return title, user_id
+
+
+def get_user_id(event, payload=None):
+    payload = payload or {}
+    if payload.get("user_id"):
+        return payload.get("user_id")
+
+    query = event.get("queryStringParameters") or {}
+    if query.get("user_id"):
+        return query.get("user_id")
+
+    headers = {k.lower(): v for k, v in (event.get("headers") or {}).items()}
+    if headers.get("x-user-id"):
+        return headers.get("x-user-id")
+
+    return DEMO_USER_ID
+
+
+def safe_filename(name):
+    cleaned = re.sub(r"[^a-zA-Z0-9._-]", "_", (name or "").strip())
+    return cleaned or "uploaded.pdf"
+
+
+def use_bedrock_ingestion():
+    return (
+        INGESTION_MODE == "bedrock"
+        and bool(BEDROCK_KNOWLEDGE_BASE_ID)
+        and bool(BEDROCK_DATA_SOURCE_ID)
+    )
+
+
+def start_kb_ingestion():
+    response_data = BEDROCK_AGENT.start_ingestion_job(
+        knowledgeBaseId=BEDROCK_KNOWLEDGE_BASE_ID,
+        dataSourceId=BEDROCK_DATA_SOURCE_ID,
+        clientToken=str(uuid.uuid4()),
+        description="StudyBot document ingestion trigger",
+    )
+    return response_data.get("ingestionJob", {})
+
+
+def map_ingestion_status_to_kb(status):
+    status_map = {
+        "STARTING": "PROCESSING",
+        "IN_PROGRESS": "PROCESSING",
+        "COMPLETE": "READY",
+        "FAILED": "FAILED",
+        "STOPPING": "PROCESSING",
+        "STOPPED": "FAILED",
+    }
+    return status_map.get(str(status or "").upper(), "PROCESSING")
+
+
+def refresh_doc_status_from_ingestion(doc_item):
+    if not doc_item:
+        return None
+    ingestion_job_id = doc_item.get("ingestion_job_id")
+    if not ingestion_job_id:
+        return doc_item
+
+    if not use_bedrock_ingestion():
+        return doc_item
+
+    try:
+        response_data = BEDROCK_AGENT.get_ingestion_job(
+            knowledgeBaseId=BEDROCK_KNOWLEDGE_BASE_ID,
+            dataSourceId=BEDROCK_DATA_SOURCE_ID,
+            ingestionJobId=ingestion_job_id,
+        )
+        ingestion_job = response_data.get("ingestionJob", {})
+        ingestion_status = str(ingestion_job.get("status", "IN_PROGRESS")).upper()
+        kb_status = map_ingestion_status_to_kb(ingestion_status)
+
+        updated_doc = {
+            **doc_item,
+            "ingestion_status": ingestion_status,
+            "kb_status": kb_status,
+            "ingestion_updated_at": now_iso(),
+        }
+        TABLE.put_item(Item=updated_doc)
+
+        if kb_status == "READY":
+            concepts = updated_doc.get("concepts") or concepts_for(updated_doc.get("title", "uploaded.pdf"))
+            upsert_summary_item(
+                user_id=updated_doc.get("PK", "").replace("USER#", "") or DEMO_USER_ID,
+                doc_id=updated_doc.get("doc_id"),
+                summary=summary_text_for(updated_doc.get("title", "uploaded.pdf")),
+                testable_concepts=testable_concepts_for(concepts),
+            )
+
+        return updated_doc
+    except Exception:
+        return doc_item
 
 
 def pk_user(user_id):
@@ -185,6 +295,25 @@ def ensure_profile(user_id, email):
     return item
 
 
+def find_profile_by_email(email):
+    if not email:
+        return None
+
+    response_data = TABLE.scan(
+        FilterExpression=Attr("SK").eq(sk_profile()) & Attr("email").eq(email)
+    )
+    items = response_data.get("Items", [])
+
+    while response_data.get("LastEvaluatedKey"):
+        response_data = TABLE.scan(
+            FilterExpression=Attr("SK").eq(sk_profile()) & Attr("email").eq(email),
+            ExclusiveStartKey=response_data["LastEvaluatedKey"],
+        )
+        items.extend(response_data.get("Items", []))
+
+    return items[0] if items else None
+
+
 def get_doc(user_id, doc_id):
     return TABLE.get_item(Key={"PK": pk_user(user_id), "SK": sk_doc(doc_id)}).get("Item")
 
@@ -231,6 +360,9 @@ def ensure_document_ready(user_id, doc_id):
     if not doc_item:
         return None
 
+    if use_bedrock_ingestion():
+        return refresh_doc_status_from_ingestion(doc_item)
+
     if doc_item.get("kb_status") == "READY":
         return doc_item
 
@@ -259,16 +391,18 @@ def ensure_document_ready(user_id, doc_id):
 def handle_login(event):
     payload = parse_json_body(event)
     email = payload.get("email", "")
-    password = payload.get("password", "")
+    profile = find_profile_by_email(email)
+    if not profile:
+        return response(401, {"message": "Invalid email"})
 
-    if email not in DEMO_EMAILS or password != DEMO_PASSWORD:
-        return response(401, {"message": "Invalid credentials"})
+    user_id = profile.get("user_id") or str(profile.get("PK", "")).replace("USER#", "")
+    if not user_id:
+        user_id = DEMO_USER_ID
 
-    ensure_profile(DEMO_USER_ID, email)
     return response(
         200,
         {
-            "user_id": DEMO_USER_ID,
+            "user_id": user_id,
             "token": "demo-token",
             "message": "Login success",
         },
@@ -299,9 +433,98 @@ def handle_upload(event):
     return response(200, {"doc_id": doc_id, "status": "PROCESSING", "kb_status": "PROCESSING"})
 
 
+def handle_upload_url(event):
+    if not UPLOADS_BUCKET_NAME:
+        return response(500, {"message": "UPLOADS_BUCKET_NAME is not configured"})
+
+    payload = parse_json_body(event)
+    user_id = get_user_id(event, payload)
+    filename = safe_filename(payload.get("filename") or payload.get("title") or "uploaded.pdf")
+    content_type = payload.get("content_type") or "application/octet-stream"
+    doc_id = payload.get("doc_id") or f"doc_{uuid.uuid4().hex[:10]}"
+    s3_key = payload.get("s3_key") or f"documents/{user_id}/{doc_id}/{filename}"
+
+    ensure_profile(user_id, f"{user_id}@studybot.com")
+
+    doc_item = {
+        "PK": pk_user(user_id),
+        "SK": sk_doc(doc_id),
+        "doc_id": doc_id,
+        "title": filename,
+        "s3_key": s3_key,
+        "kb_status": "UPLOADING",
+        "uploaded_at": now_iso(),
+        "page_count": 0,
+        "concepts": concepts_for(filename),
+    }
+    TABLE.put_item(Item=doc_item)
+
+    upload_url = S3.generate_presigned_url(
+        ClientMethod="put_object",
+        Params={
+            "Bucket": UPLOADS_BUCKET_NAME,
+            "Key": s3_key,
+            "ContentType": content_type,
+        },
+        ExpiresIn=900,
+        HttpMethod="PUT",
+    )
+
+    return response(
+        200,
+        {
+            "doc_id": doc_id,
+            "s3_key": s3_key,
+            "upload_url": upload_url,
+            "upload_method": "PUT",
+            "headers": {"Content-Type": content_type},
+            "complete_path": f"/documents/{doc_id}/complete",
+        },
+    )
+
+
+def handle_upload_complete(event, doc_id):
+    payload = parse_json_body(event)
+    user_id = get_user_id(event, payload)
+    doc_item = get_doc(user_id, doc_id)
+    if not doc_item:
+        return response(404, {"message": "Document not found"})
+
+    updated = {
+        **doc_item,
+        "kb_status": "PROCESSING",
+        "processing_started_at_epoch": now_epoch(),
+    }
+
+    ingestion_job_id = f"ing_{uuid.uuid4().hex[:10]}"
+    ingestion_status = "IN_PROGRESS"
+    if use_bedrock_ingestion():
+        try:
+            ingestion_job = start_kb_ingestion()
+            ingestion_job_id = ingestion_job.get("ingestionJobId", ingestion_job_id)
+            ingestion_status = str(ingestion_job.get("status", "STARTING")).upper()
+        except Exception as exc:
+            return response(500, {"message": "Failed to start Bedrock ingestion", "error": str(exc)})
+
+    updated["ingestion_job_id"] = ingestion_job_id
+    updated["ingestion_status"] = ingestion_status
+    updated["ingestion_started_at"] = now_iso()
+    TABLE.put_item(Item=updated)
+
+    return response(
+        200,
+        {
+            "doc_id": doc_id,
+            "ingestion_job_id": ingestion_job_id,
+            "ingestion_status": ingestion_status,
+            "status": "PROCESSING",
+            "kb_status": "PROCESSING",
+        },
+    )
+
+
 def handle_documents_list(event):
-    query = event.get("queryStringParameters") or {}
-    user_id = query.get("user_id") or DEMO_USER_ID
+    user_id = get_user_id(event)
 
     docs = []
     for doc in list_documents(user_id):
@@ -309,23 +532,24 @@ def handle_documents_list(event):
         if ensured:
             docs.append(ensured)
 
-    documents = [
+    docs = [
         {
             "doc_id": item["doc_id"],
+            "filename": item.get("title", "uploaded.pdf"),
             "name": item.get("title", "uploaded.pdf"),
             "title": item.get("title", "uploaded.pdf"),
-            "status": item.get("kb_status", "PROCESSING"),
+            "status": "COMPLETE" if item.get("kb_status") == "READY" else item.get("kb_status", "PROCESSING"),
             "kb_status": item.get("kb_status", "PROCESSING"),
+            "s3_key": item.get("s3_key", ""),
         }
         for item in docs
     ]
 
-    return response(200, {"documents": documents})
+    return response(200, {"documents": docs, "docs": docs})
 
 
 def handle_document_detail(event, doc_id):
-    query = event.get("queryStringParameters") or {}
-    user_id = query.get("user_id") or DEMO_USER_ID
+    user_id = get_user_id(event)
 
     doc_item = ensure_document_ready(user_id, doc_id)
     if not doc_item:
@@ -348,15 +572,28 @@ def handle_document_detail(event, doc_id):
 
 
 def handle_document_status(event, doc_id):
-    query = event.get("queryStringParameters") or {}
-    user_id = query.get("user_id") or DEMO_USER_ID
+    user_id = get_user_id(event)
 
     doc_item = ensure_document_ready(user_id, doc_id)
     if not doc_item:
         return response(404, {"message": "Document not found"})
 
     status = doc_item.get("kb_status", "PROCESSING")
-    return response(200, {"doc_id": doc_id, "status": status, "kb_status": status})
+    normalized = "COMPLETE" if status == "READY" else status
+    return response(
+        200,
+        {
+            "doc_id": doc_id,
+            "status": normalized,
+            "kb_status": status,
+            "document": {
+                "doc_id": doc_id,
+                "filename": doc_item.get("title", "uploaded.pdf"),
+                "status": normalized,
+                "kb_status": status,
+            },
+        },
+    )
 
 
 def handle_ask(event):
@@ -492,9 +729,15 @@ def route_request(event):
 
     if method == "POST" and path == "/login":
         return handle_login(event)
+    if method == "POST" and path == "/documents/upload-url":
+        return handle_upload_url(event)
+    if method == "POST" and path == "/upload/presign":
+        return handle_upload_url(event)
     if method == "POST" and path == "/upload":
         return handle_upload(event)
     if method == "GET" and path == "/documents":
+        return handle_documents_list(event)
+    if method == "GET" and path == "/docs/list":
         return handle_documents_list(event)
     if method == "POST" and path == "/ask":
         return handle_ask(event)
@@ -506,6 +749,10 @@ def route_request(event):
     detail_match = re.match(r"^/documents/([^/]+)$", path)
     if method == "GET" and detail_match:
         return handle_document_detail(event, detail_match.group(1))
+
+    complete_match = re.match(r"^/documents/([^/]+)/complete$", path)
+    if method == "POST" and complete_match:
+        return handle_upload_complete(event, complete_match.group(1))
 
     status_match = re.match(r"^/documents/([^/]+)/status$", path)
     if method == "GET" and status_match:
