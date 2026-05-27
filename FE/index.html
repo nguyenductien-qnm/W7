@@ -1,0 +1,532 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StudyBot</title>
+<script src="./config.js"></script>
+<style>
+:root {
+  --bg: #f7f8fa;
+  --panel: #ffffff;
+  --text: #111827;
+  --muted: #667085;
+  --border: #d9dee7;
+  --primary: #2563eb;
+  --primary-dark: #1d4ed8;
+  --green: #047857;
+  --amber: #b45309;
+  --red: #b42318;
+  --soft-blue: #eff6ff;
+  --soft-green: #ecfdf3;
+  --soft-amber: #fffbeb;
+  --radius: 8px;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+  color: var(--text);
+  background: var(--bg);
+}
+.topbar {
+  min-height: 68px;
+  padding: 14px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  background: #fff;
+  border-bottom: 1px solid var(--border);
+}
+.brand h1 { margin: 0; font-size: 20px; line-height: 1.1; }
+.brand p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+.auth { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.pill {
+  display: inline-flex;
+  min-height: 30px;
+  align-items: center;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  background: #fff;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.layout {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 20px;
+  display: grid;
+  grid-template-columns: minmax(260px, 340px) 1fr;
+  gap: 16px;
+}
+.stack { display: grid; gap: 16px; align-content: start; }
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+}
+.panel h2 {
+  margin: 0 0 12px;
+  font-size: 15px;
+  line-height: 1.2;
+}
+.row { display: flex; gap: 8px; align-items: center; }
+.row.wrap { flex-wrap: wrap; }
+.row > * { min-width: 0; }
+input, select, textarea {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 11px;
+  font: inherit;
+  background: #fff;
+  color: var(--text);
+}
+textarea { min-height: 84px; resize: vertical; }
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, .12);
+}
+button {
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+button.primary { background: var(--primary); color: white; }
+button.primary:hover { background: var(--primary-dark); }
+button.secondary { background: #fff; color: var(--text); border-color: var(--border); }
+button.secondary:hover { background: #f3f4f6; }
+button:disabled { opacity: .55; cursor: not-allowed; }
+.drop {
+  display: block;
+  border: 1px dashed #aab4c3;
+  border-radius: var(--radius);
+  padding: 18px;
+  background: #fbfcfe;
+  text-align: center;
+  cursor: pointer;
+}
+.drop.dragover { background: var(--soft-blue); border-color: var(--primary); }
+.drop strong { display: block; margin-bottom: 4px; }
+.drop span { color: var(--muted); font-size: 13px; }
+.drop input { display: none; }
+.doc-list { display: grid; gap: 8px; }
+.doc {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px;
+  display: grid;
+  gap: 6px;
+  background: #fff;
+}
+.doc.selected { border-color: var(--primary); background: var(--soft-blue); }
+.doc-name { font-weight: 650; overflow-wrap: anywhere; }
+.meta { color: var(--muted); font-size: 12px; }
+.status { color: var(--amber); font-size: 12px; font-weight: 650; }
+.status.complete { color: var(--green); }
+.tabs { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+.tab.active { background: var(--text); color: #fff; border-color: var(--text); }
+.result {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: #fff;
+  white-space: pre-wrap;
+}
+.result.ok { background: var(--soft-green); border-color: #abefc6; }
+.result.warn { background: var(--soft-amber); border-color: #fedf89; }
+.citation {
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: #fff;
+  font-size: 13px;
+}
+.empty { color: var(--muted); font-size: 13px; padding: 8px 0; }
+.debug {
+  max-height: 260px;
+  overflow: auto;
+  margin: 0;
+  font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: #d1d5db;
+  background: #111827;
+  border-radius: var(--radius);
+  padding: 12px;
+}
+@media (max-width: 800px) {
+  .layout { grid-template-columns: 1fr; padding: 12px; }
+  .topbar { padding: 12px; align-items: flex-start; }
+}
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <h1>StudyBot</h1>
+    <p>Upload notes, ask cited questions, generate summaries and quizzes.</p>
+  </div>
+  <div class="auth">
+    <span class="pill" id="backend-pill">Checking API</span>
+    <span class="pill" id="user-pill">Local user</span>
+    <button class="secondary" id="login-btn" onclick="login()">Log in</button>
+    <button class="secondary" id="logout-btn" onclick="logout()" hidden>Log out</button>
+  </div>
+</header>
+
+<main class="layout">
+  <aside class="stack">
+    <section class="panel">
+      <h2>Upload</h2>
+      <label class="drop" id="drop">
+        <strong>Choose a PDF, TXT, or Markdown file</strong>
+        <span>Production uses a presigned S3 upload URL. Local mode uses the API directly.</span>
+        <input type="file" id="file" accept=".pdf,.txt,.md">
+      </label>
+      <div id="upload-result"></div>
+    </section>
+
+    <section class="panel">
+      <div class="row">
+        <h2 style="flex:1;margin:0;">Documents</h2>
+        <button class="secondary" onclick="refreshDocs()">Refresh</button>
+      </div>
+      <div class="doc-list" id="docs"><div class="empty">No documents yet.</div></div>
+    </section>
+  </aside>
+
+  <section class="stack">
+    <section class="panel">
+      <div class="tabs">
+        <button class="secondary tab active" data-tab="qa" onclick="showTab('qa')">Q&A</button>
+        <button class="secondary tab" data-tab="summary" onclick="showTab('summary')">Summary</button>
+        <button class="secondary tab" data-tab="quiz" onclick="showTab('quiz')">Quiz</button>
+      </div>
+
+      <div id="qa-panel">
+        <h2>Ask a question</h2>
+        <div class="row">
+          <input id="question" type="text" placeholder="What should I remember from these notes?">
+          <button class="primary" id="ask-btn" onclick="ask()">Ask</button>
+        </div>
+        <div id="answer"></div>
+      </div>
+
+      <div id="summary-panel" hidden>
+        <h2>Generate a study summary</h2>
+        <button class="primary" id="summary-btn" onclick="summarize()">Summarize selected scope</button>
+        <div id="summary-result"></div>
+      </div>
+
+      <div id="quiz-panel" hidden>
+        <h2>Generate a quiz</h2>
+        <div class="row wrap">
+          <select id="difficulty" style="max-width:160px;">
+            <option value="easy">Easy</option>
+            <option value="medium" selected>Medium</option>
+            <option value="hard">Hard</option>
+          </select>
+          <input id="count" type="number" min="1" max="10" value="5" style="max-width:120px;">
+          <button class="primary" id="quiz-btn" onclick="quiz()">Generate</button>
+        </div>
+        <div id="quiz-result"></div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Debug</h2>
+      <pre class="debug" id="debug">No requests yet.</pre>
+    </section>
+  </section>
+</main>
+
+<script>
+const CONFIG = window.STUDYBOT_CONFIG || {};
+const API_BASE = (CONFIG.apiBase || new URLSearchParams(location.search).get('api') || '').replace(/\/$/, '');
+const LOCAL_USER = new URLSearchParams(location.search).get('user') || 'test-user-001';
+let selectedDocId = null;
+
+function $(id) { return document.getElementById(id); }
+function authState() {
+  return {
+    idToken: sessionStorage.getItem('studybot_id_token') || '',
+    accessToken: sessionStorage.getItem('studybot_access_token') || '',
+    email: sessionStorage.getItem('studybot_email') || ''
+  };
+}
+function setBusy(id, busy) { const el = $(id); if (el) el.disabled = busy; }
+function log(label, body) {
+  const prev = $('debug').textContent === 'No requests yet.' ? '' : $('debug').textContent;
+  $('debug').textContent = `${new Date().toLocaleTimeString()} ${label}\n${JSON.stringify(body, null, 2)}\n\n${prev}`.slice(0, 8000);
+}
+function renderResult(id, text, mode = '') {
+  $(id).innerHTML = `<div class="result ${mode}">${escapeHtml(text)}</div>`;
+}
+function escapeHtml(s) {
+  return String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function headers(json = false) {
+  const h = {};
+  const token = authState().idToken;
+  if (token) h.Authorization = `Bearer ${token}`;
+  else h['X-User-Id'] = LOCAL_USER;
+  if (json) h['Content-Type'] = 'application/json';
+  return h;
+}
+async function call(path, opts = {}) {
+  opts.headers = Object.assign(headers(opts.json), opts.headers || {});
+  if (opts.json) {
+    opts.body = JSON.stringify(opts.json);
+    delete opts.json;
+  }
+  const res = await fetch(API_BASE + path, opts);
+  const text = await res.text();
+  let body;
+  try { body = JSON.parse(text); } catch { body = text; }
+  log(`${opts.method || 'GET'} ${path}`, body);
+  if (!res.ok) throw new Error(body.detail || body.message || `HTTP ${res.status}`);
+  return body;
+}
+function base64Url(bytes) {
+  return btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+async function sha256(text) {
+  return crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+}
+function parseJwt(token) {
+  try { return JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))); }
+  catch { return {}; }
+}
+async function login() {
+  if (!CONFIG.cognitoDomain || !CONFIG.clientId) return;
+  const verifier = base64Url(crypto.getRandomValues(new Uint8Array(32)));
+  sessionStorage.setItem('studybot_pkce_verifier', verifier);
+  const challenge = base64Url(await sha256(verifier));
+  const redirect = CONFIG.redirectUri || location.origin + location.pathname;
+  const params = new URLSearchParams({
+    client_id: CONFIG.clientId,
+    response_type: 'code',
+    scope: 'openid email profile',
+    redirect_uri: redirect,
+    code_challenge_method: 'S256',
+    code_challenge: challenge
+  });
+  location.href = `${CONFIG.cognitoDomain}/oauth2/authorize?${params}`;
+}
+async function finishLogin() {
+  const params = new URLSearchParams(location.search);
+  const code = params.get('code');
+  if (!code || !CONFIG.cognitoDomain || !CONFIG.clientId) return;
+  const verifier = sessionStorage.getItem('studybot_pkce_verifier');
+  const redirect = CONFIG.redirectUri || location.origin + location.pathname;
+  const body = new URLSearchParams({
+    grant_type: 'authorization_code',
+    client_id: CONFIG.clientId,
+    code,
+    redirect_uri: redirect,
+    code_verifier: verifier || ''
+  });
+  const res = await fetch(`${CONFIG.cognitoDomain}/oauth2/token`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    body
+  });
+  const tokens = await res.json();
+  log('Cognito token exchange', tokens.error ? tokens : {ok: true});
+  if (tokens.id_token) {
+    sessionStorage.setItem('studybot_id_token', tokens.id_token);
+    sessionStorage.setItem('studybot_access_token', tokens.access_token || '');
+    const claims = parseJwt(tokens.id_token);
+    sessionStorage.setItem('studybot_email', claims.email || claims.sub || 'signed in');
+    history.replaceState({}, document.title, location.pathname);
+  }
+}
+function logout() {
+  sessionStorage.clear();
+  if (CONFIG.cognitoDomain && CONFIG.clientId) {
+    const params = new URLSearchParams({
+      client_id: CONFIG.clientId,
+      logout_uri: CONFIG.logoutUri || location.origin + location.pathname
+    });
+    location.href = `${CONFIG.cognitoDomain}/logout?${params}`;
+  } else {
+    updateAuthUi();
+  }
+}
+function updateAuthUi() {
+  const state = authState();
+  const configured = !!(CONFIG.cognitoDomain && CONFIG.clientId);
+  $('login-btn').hidden = !configured || !!state.idToken;
+  $('logout-btn').hidden = !state.idToken;
+  $('user-pill').textContent = state.idToken ? state.email : `Local: ${LOCAL_USER}`;
+}
+async function loadStatus() {
+  try {
+    const body = await call('/health');
+    $('backend-pill').textContent = Object.entries(body.backends).map(([k,v]) => `${k}:${v}`).join(' ');
+  } catch (err) {
+    $('backend-pill').textContent = 'API offline';
+  }
+}
+const drop = $('drop');
+drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('dragover'); });
+drop.addEventListener('dragleave', () => drop.classList.remove('dragover'));
+drop.addEventListener('drop', e => {
+  e.preventDefault();
+  drop.classList.remove('dragover');
+  if (e.dataTransfer.files[0]) upload(e.dataTransfer.files[0]);
+});
+$('file').addEventListener('change', e => { if (e.target.files[0]) upload(e.target.files[0]); });
+async function upload(file) {
+  renderResult('upload-result', `Uploading ${file.name}...`, 'warn');
+  try {
+    if (authState().idToken && CONFIG.apiBase) {
+      try {
+        const intent = await call('/documents/upload-url', {
+          method: 'POST',
+          json: {filename: file.name, content_type: file.type || 'application/octet-stream', size: file.size}
+        });
+        const put = await fetch(intent.upload_url, {method: 'PUT', headers: {'Content-Type': file.type || 'application/octet-stream'}, body: file});
+        log(`PUT S3 ${intent.s3_key}`, {status: put.status, ok: put.ok});
+        if (!put.ok) throw new Error(`S3 upload failed: HTTP ${put.status}`);
+        const complete = await call(`/documents/${intent.doc_id}/complete`, {method: 'POST'});
+        renderResult('upload-result', `${file.name} uploaded. Ingestion job: ${complete.ingestion_job_id}`, 'ok');
+        selectedDocId = intent.doc_id;
+      } catch (presignedErr) {
+        log('Presigned upload fallback', {error: presignedErr.message});
+        const body = await directUpload(file);
+        renderResult('upload-result', `${body.filename} uploaded through API fallback.`, 'ok');
+        selectedDocId = body.doc_id;
+      }
+    } else {
+      const body = await directUpload(file);
+      renderResult('upload-result', `${body.filename} uploaded and indexed locally.`, 'ok');
+      selectedDocId = body.doc_id;
+    }
+    await refreshDocs();
+  } catch (err) {
+    renderResult('upload-result', err.message, 'warn');
+  }
+}
+async function directUpload(file) {
+  const form = new FormData();
+  form.append('file', file);
+  const res = await fetch(API_BASE + '/upload', {method: 'POST', headers: headers(false), body: form});
+  const text = await res.text();
+  let body;
+  try { body = JSON.parse(text); } catch { body = text; }
+  log('POST /upload', body);
+  if (!res.ok) throw new Error(body.detail || body.message || `Upload failed: HTTP ${res.status}`);
+  return body;
+}
+async function refreshDocs() {
+  try {
+    const body = await call('/docs/list');
+    const docs = await hydrateDocStatuses(body.docs || []);
+    $('docs').innerHTML = docs.length ? docs.map(d => `
+      <button class="doc ${selectedDocId === d.doc_id ? 'selected' : ''}" onclick="selectDoc('${d.doc_id}')">
+        <span class="doc-name">${escapeHtml(d.filename || d.doc_id)}</span>
+        <span class="meta">${escapeHtml(d.doc_id || '')}</span>
+        <span class="status ${(d.status || '').toLowerCase().includes('complete') ? 'complete' : ''}">${escapeHtml(d.status || 'UNKNOWN')}</span>
+      </button>`).join('') : '<div class="empty">No documents yet.</div>';
+  } catch (err) {
+    $('docs').innerHTML = `<div class="empty">${escapeHtml(err.message)}</div>`;
+  }
+}
+async function hydrateDocStatuses(docs) {
+  const hydrated = [];
+  for (const doc of docs) {
+    const status = String(doc.status || '').toUpperCase();
+    if (doc.ingestion_job_id && status !== 'COMPLETE' && status !== 'FAILED') {
+      try {
+        const body = await call(`/documents/${doc.doc_id}/status`);
+        hydrated.push(body.document || doc);
+        continue;
+      } catch (err) {
+        log(`GET /documents/${doc.doc_id}/status failed`, {error: err.message});
+      }
+    }
+    hydrated.push(doc);
+  }
+  return hydrated;
+}
+function selectDoc(docId) {
+  selectedDocId = selectedDocId === docId ? null : docId;
+  refreshDocs();
+}
+function showTab(tab) {
+  for (const name of ['qa', 'summary', 'quiz']) {
+    $(`${name}-panel`).hidden = name !== tab;
+    document.querySelector(`[data-tab="${name}"]`).classList.toggle('active', name === tab);
+  }
+}
+async function ask() {
+  const question = $('question').value.trim();
+  if (!question) return;
+  setBusy('ask-btn', true);
+  renderResult('answer', 'Thinking...', 'warn');
+  try {
+    const body = await call('/query', {method: 'POST', json: {question}});
+    $('answer').innerHTML = `<div class="result ok">${escapeHtml(body.answer)}</div>${renderCitations(body.citations)}`;
+  } catch (err) {
+    renderResult('answer', err.message, 'warn');
+  } finally {
+    setBusy('ask-btn', false);
+  }
+}
+async function summarize() {
+  setBusy('summary-btn', true);
+  renderResult('summary-result', 'Summarizing...', 'warn');
+  try {
+    const body = await call('/summary', {method: 'POST', json: {doc_id: selectedDocId}});
+    $('summary-result').innerHTML = `<div class="result ok">${escapeHtml(body.summary)}</div>${renderCitations(body.citations)}`;
+  } catch (err) {
+    renderResult('summary-result', err.message, 'warn');
+  } finally {
+    setBusy('summary-btn', false);
+  }
+}
+async function quiz() {
+  setBusy('quiz-btn', true);
+  renderResult('quiz-result', 'Generating quiz...', 'warn');
+  try {
+    const body = await call('/quiz', {
+      method: 'POST',
+      json: {doc_id: selectedDocId, difficulty: $('difficulty').value, count: Number($('count').value || 5)}
+    });
+    $('quiz-result').innerHTML = `<div class="result ok">${escapeHtml(body.quiz)}</div>${renderCitations(body.citations)}`;
+  } catch (err) {
+    renderResult('quiz-result', err.message, 'warn');
+  } finally {
+    setBusy('quiz-btn', false);
+  }
+}
+function renderCitations(citations = []) {
+  if (!citations.length) return '<div class="empty">No citations returned.</div>';
+  return citations.map((c, i) => `
+    <div class="citation">
+      <strong>Source ${i + 1}</strong>
+      <div class="meta">${escapeHtml(c.doc_id || JSON.stringify(c.source || {}))}</div>
+      <div>${escapeHtml(c.text || '')}</div>
+    </div>`).join('');
+}
+$('question').addEventListener('keydown', e => { if (e.key === 'Enter') ask(); });
+(async function boot() {
+  await finishLogin();
+  updateAuthUi();
+  await loadStatus();
+  await refreshDocs();
+})();
+</script>
+</body>
+</html>
