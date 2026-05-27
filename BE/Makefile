@@ -9,10 +9,10 @@ local-ddb-down:
 	docker compose down
 
 init-ddb:
-	python3 scripts/init_dynamodb.py
+	@set -a; [ -f .env ] && source .env || true; set +a; python3 scripts/init_dynamodb.py
 
 build:
 	sam build
 
 api:
-	sam local start-api --env-vars local-env.json --port 3000
+	@set -a; [ -f .env ] && source .env || true; set +a; sam local start-api --env-vars local-env.json --port 3000

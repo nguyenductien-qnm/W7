@@ -16,6 +16,7 @@ Resources:
         AllowHeaders:
           - Content-Type
           - Authorization
+          - X-User-Id
         AllowMethods:
           - GET
           - POST
@@ -48,9 +49,26 @@ Resources:
         Variables:
           DOCUMENTS_TABLE: !Ref DocumentsTable
           AWS_REGION: ap-southeast-1
+          INGESTION_MODE: mock
+          UPLOADS_BUCKET_NAME: studybotdatastack-uploadbucketd2c1da78-2cpeowy02vjk
+          BEDROCK_KNOWLEDGE_BASE_ID: LI32IWLOB5
+          BEDROCK_DATA_SOURCE_ID: BZ8NQGYFCX
+          VECTOR_INDEX_ARN: arn:aws:s3vectors:ap-southeast-1:589077667575:bucket/studybot-vectors-589077667575-ap-southeast-1/index/studybot-kb-index
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref DocumentsTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - s3:PutObject
+              Resource: arn:aws:s3:::studybotdatastack-uploadbucketd2c1da78-2cpeowy02vjk/documents/*
+            - Effect: Allow
+              Action:
+                - bedrock:StartIngestionJob
+                - bedrock:GetIngestionJob
+              Resource:
+                - arn:aws:bedrock:ap-southeast-1:589077667575:knowledge-base/LI32IWLOB5
+                - arn:aws:bedrock:ap-southeast-1:589077667575:knowledge-base/LI32IWLOB5/data-source/BZ8NQGYFCX
       Events:
         LoginApi:
           Type: HttpApi
@@ -64,11 +82,29 @@ Resources:
             ApiId: !Ref StudyBotApi
             Path: /upload
             Method: POST
+        UploadPresignApi:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref StudyBotApi
+            Path: /upload/presign
+            Method: POST
+        DocumentsUploadUrlApi:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref StudyBotApi
+            Path: /documents/upload-url
+            Method: POST
         DocumentsListApi:
           Type: HttpApi
           Properties:
             ApiId: !Ref StudyBotApi
             Path: /documents
+            Method: GET
+        DocsListAliasApi:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref StudyBotApi
+            Path: /docs/list
             Method: GET
         DocumentDetailApi:
           Type: HttpApi
@@ -76,6 +112,12 @@ Resources:
             ApiId: !Ref StudyBotApi
             Path: /documents/{doc_id}
             Method: GET
+        DocumentCompleteApi:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref StudyBotApi
+            Path: /documents/{doc_id}/complete
+            Method: POST
         DocumentStatusApi:
           Type: HttpApi
           Properties:
