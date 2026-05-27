@@ -5,6 +5,7 @@ import re
 import time
 import uuid
 from datetime import datetime, timezone
+from urllib.parse import unquote_plus
 
 import boto3
 
@@ -179,7 +180,7 @@ def process_record(record):
     if not bucket or not key:
         return {"skipped": True, "reason": "missing_bucket_or_key"}
 
-    key = key.replace("+", " ")
+    key = unquote_plus(key)
     parsed = parse_object_key(key)
     if not parsed:
         return {"skipped": True, "reason": "key_not_in_documents_prefix", "key": key}

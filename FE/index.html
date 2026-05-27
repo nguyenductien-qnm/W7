@@ -4,7 +4,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>StudyBot</title>
-<script src="./config.js"></script>
 <style>
 :root {
   --bg: #f7f8fa;
@@ -253,7 +252,8 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 
 <script>
 const CONFIG = window.STUDYBOT_CONFIG || {};
-const API_BASE = (CONFIG.apiBase || new URLSearchParams(location.search).get('api') || '').replace(/\/$/, '');
+const DEFAULT_API_BASE = 'https://3sgavxe4c0.execute-api.ap-southeast-1.amazonaws.com';
+const API_BASE = (CONFIG.apiBase || new URLSearchParams(location.search).get('api') || DEFAULT_API_BASE).replace(/\/$/, '');
 const LOCAL_USER = new URLSearchParams(location.search).get('user') || 'test-user-001';
 let selectedDocId = null;
 
@@ -333,8 +333,8 @@ function updateAuthUi() {
 }
 async function loadStatus() {
   try {
-    const body = await call('/health');
-    $('backend-pill').textContent = Object.entries(body.backends).map(([k,v]) => `${k}:${v}`).join(' ');
+    await call('/documents');
+    $('backend-pill').textContent = 'API online';
   } catch (err) {
     $('backend-pill').textContent = 'API offline';
   }
@@ -501,10 +501,21 @@ function showTab(tab) {
 async function ask() {
   const question = $('question').value.trim();
   if (!question) return;
+  if (!selectedDocId) {
+    renderResult('answer', 'Please select a document first.', 'warn');
+    return;
+  }
   setBusy('ask-btn', true);
   renderResult('answer', 'Thinking...', 'warn');
   try {
-    const body = await call('/query', {method: 'POST', json: {question}});
+    const body = await call('/ask', {
+      method: 'POST',
+      json: {
+        user_id: getCurrentUserId(),
+        doc_id: selectedDocId,
+        question
+      }
+    });
     $('answer').innerHTML = `<div class="result ok">${escapeHtml(body.answer)}</div>${renderCitations(body.citations)}`;
   } catch (err) {
     renderResult('answer', err.message, 'warn');
@@ -513,11 +524,16 @@ async function ask() {
   }
 }
 async function summarize() {
+  if (!selectedDocId) {
+    renderResult('summary-result', 'Please select a document first.', 'warn');
+    return;
+  }
   setBusy('summary-btn', true);
   renderResult('summary-result', 'Summarizing...', 'warn');
   try {
-    const body = await call('/summary', {method: 'POST', json: {doc_id: selectedDocId}});
-    $('summary-result').innerHTML = `<div class="result ok">${escapeHtml(body.summary)}</div>${renderCitations(body.citations)}`;
+    const body = await call(`/documents/${selectedDocId}`);
+    const concepts = (body.testable_concepts || []).map((c, i) => `${i + 1}. ${c}`).join('\n') || 'No concepts yet.';
+    $('summary-result').innerHTML = `<div class="result ok">${escapeHtml(body.summary || 'No summary yet.')}\n\nTestable concepts:\n${escapeHtml(concepts)}</div>`;
   } catch (err) {
     renderResult('summary-result', err.message, 'warn');
   } finally {
@@ -525,6 +541,10 @@ async function summarize() {
   }
 }
 async function quiz() {
+  if (!selectedDocId) {
+    renderResult('quiz-result', 'Please select a document first.', 'warn');
+    return;
+  }
   setBusy('quiz-btn', true);
   renderResult('quiz-result', 'Generating quiz...', 'warn');
   try {
@@ -532,7 +552,21 @@ async function quiz() {
       method: 'POST',
       json: {doc_id: selectedDocId, difficulty: $('difficulty').value, count: Number($('count').value || 5)}
     });
-    $('quiz-result').innerHTML = `<div class="result ok">${escapeHtml(body.quiz)}</div>${renderCitations(body.citations)}`;
+    const questions = Array.isArray(body.questions) ? body.questions : [];
+    if (!questions.length) {
+      renderResult('quiz-result', 'No quiz questions returned.', 'warn');
+      return;
+    }
+    const lines = [];
+    questions.forEach((q, idx) => {
+      lines.push(`${idx + 1}. ${q.question || ''}`);
+      const options = Array.isArray(q.options) ? q.options : [];
+      options.forEach((op, j) => lines.push(`   ${String.fromCharCode(65 + j)}. ${op}`));
+      lines.push(`   Correct: ${q.answer || ''}`);
+      if (q.explanation) lines.push(`   Note: ${q.explanation}`);
+      lines.push('');
+    });
+    $('quiz-result').innerHTML = `<div class="result ok">${escapeHtml(lines.join('\n').trim())}</div>`;
   } catch (err) {
     renderResult('quiz-result', err.message, 'warn');
   } finally {
@@ -544,8 +578,8 @@ function renderCitations(citations = []) {
   return citations.map((c, i) => `
     <div class="citation">
       <strong>Source ${i + 1}</strong>
-      <div class="meta">${escapeHtml(c.doc_id || JSON.stringify(c.source || {}))}</div>
-      <div>${escapeHtml(c.text || '')}</div>
+      <div class="meta">${escapeHtml(c.document || c.doc_id || '')}${c.slide ? ` · slide ${escapeHtml(c.slide)}` : ''}</div>
+      <div>${escapeHtml(c.text || c.chunk_id || '')}</div>
     </div>`).join('');
 }
 $('question').addEventListener('keydown', e => { if (e.key === 'Enter') ask(); });
