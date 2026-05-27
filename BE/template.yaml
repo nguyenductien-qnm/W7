@@ -131,6 +131,12 @@ Resources:
             ApiId: !Ref StudyBotApi
             Path: /ask
             Method: POST
+        SummaryApi:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref StudyBotApi
+            Path: /summary
+            Method: POST
         QuizApi:
           Type: HttpApi
           Properties:

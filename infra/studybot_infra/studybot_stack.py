@@ -115,8 +115,12 @@ class StudyBotInfraStack(Stack):
 
         api_lambda.add_to_role_policy(
             iam.PolicyStatement(
-                actions=["bedrock:StartIngestionJob", "bedrock:GetIngestionJob"],
-                resources=[kb_arn, data_source_arn],
+                actions=[
+                    "bedrock:StartIngestionJob",
+                    "bedrock:GetIngestionJob",
+                    "bedrock:Retrieve",
+                ],
+                resources=["*", kb_arn, data_source_arn],
             )
         )
         process_pdf_lambda.add_to_role_policy(

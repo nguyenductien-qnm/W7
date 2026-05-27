@@ -10,6 +10,9 @@ from email.parser import BytesParser
 
 import boto3
 from boto3.dynamodb.conditions import Attr, Key
+from qa_kb import ask_knowledge_base
+from quiz_kb import generate_fallback_quiz, generate_quiz_from_kb
+from summary_kb import summarize_knowledge_base
 
 
 DEMO_USER_ID = "demo"
@@ -597,38 +600,85 @@ def handle_document_status(event, doc_id):
     )
 
 
+def normalize_doc_ids(payload):
+    candidates = []
+    if payload.get("doc_id"):
+        candidates.append(payload.get("doc_id"))
+    if isinstance(payload.get("doc_ids"), list):
+        candidates.extend(payload.get("doc_ids"))
+    if isinstance(payload.get("selected_doc_ids"), list):
+        candidates.extend(payload.get("selected_doc_ids"))
+
+    out = []
+    seen = set()
+    for item in candidates:
+        value = str(item or "").strip()
+        if value and value not in seen:
+            seen.add(value)
+            out.append(value)
+    return out
+
+
 def handle_ask(event):
     payload = parse_json_body(event)
     user_id = payload.get("user_id") or DEMO_USER_ID
-    doc_id = payload.get("doc_id")
+    selected_doc_ids = normalize_doc_ids(payload)
     question = (payload.get("question") or "").strip()
 
-    if not doc_id or not question:
-        return response(400, {"message": "doc_id and question are required"})
+    if not selected_doc_ids or not question:
+        return response(400, {"message": "selected_doc_ids (or doc_id) and question are required"})
 
-    doc_item = ensure_document_ready(user_id, doc_id)
-    if not doc_item:
-        return response(404, {"message": "Document not found"})
+    selected_docs = []
+    for doc_id in selected_doc_ids:
+        doc_item = ensure_document_ready(user_id, doc_id)
+        if doc_item:
+            selected_docs.append(doc_item)
+    if not selected_docs:
+        return response(404, {"message": "No selected documents were found"})
+
+    # Keep first selected doc as primary for history compatibility.
+    primary_doc = selected_docs[0]
+    doc_id = primary_doc.get("doc_id")
 
     created_at = now_iso()
-    topic = (doc_item.get("concepts") or ["General"])[0]
+    topic = (primary_doc.get("concepts") or ["General"])[0]
     answer = (
         "CAP theorem says that under network partition, a distributed system must trade between "
         "consistency and availability."
     )
     citations = [
         {
-            "document": doc_item.get("title", "uploaded.pdf"),
+            "document": primary_doc.get("title", "uploaded.pdf"),
             "slide": 12,
             "chunk_id": "chunk_034",
         }
     ]
+
+    if BEDROCK_KNOWLEDGE_BASE_ID:
+        try:
+            kb_result = ask_knowledge_base(
+                question=question,
+                knowledge_base_id=BEDROCK_KNOWLEDGE_BASE_ID,
+                doc_title=primary_doc.get("title", "uploaded.pdf"),
+                allowed_doc_ids=[item.get("doc_id") for item in selected_docs if item.get("doc_id")],
+                doc_titles_by_id={
+                    item.get("doc_id"): item.get("title", "uploaded.pdf")
+                    for item in selected_docs
+                    if item.get("doc_id")
+                },
+            )
+            answer = kb_result.get("answer") or answer
+            citations = kb_result.get("citations") or citations
+            topic = kb_result.get("topic") or topic
+        except Exception:
+            pass
 
     TABLE.put_item(
         Item={
             "PK": pk_user(user_id),
             "SK": sk_question(created_at),
             "doc_id": doc_id,
+            "selected_doc_ids": [item.get("doc_id") for item in selected_docs if item.get("doc_id")],
             "question": question,
             "answer": answer,
             "citations": citations,
@@ -641,6 +691,7 @@ def handle_ask(event):
         200,
         {
             "doc_id": doc_id,
+            "selected_doc_ids": [item.get("doc_id") for item in selected_docs if item.get("doc_id")],
             "question": question,
             "answer": answer,
             "citation": citations,
@@ -649,50 +700,132 @@ def handle_ask(event):
     )
 
 
-def generate_quiz_questions(concepts):
-    out = []
-    for concept in concepts[:5]:
-        out.append(
-            {
-                "question": f"What does {concept} mainly relate to in distributed systems?",
-                "options": [
-                    "A. UI animation",
-                    "B. System trade-offs and reliability",
-                    "C. CSS layout",
-                    "D. Image compression",
-                ],
-                "answer": "B",
-                "explanation": f"{concept} is used to reason about distributed-system behavior.",
-            }
-        )
-    return out
+def handle_summary(event):
+    payload = parse_json_body(event)
+    user_id = payload.get("user_id") or get_user_id(event, payload)
+    selected_doc_ids = normalize_doc_ids(payload)
+    if not selected_doc_ids:
+        return response(400, {"message": "selected_doc_ids (or doc_id) is required"})
+
+    selected_docs = []
+    for doc_id in selected_doc_ids:
+        doc_item = ensure_document_ready(user_id, doc_id)
+        if doc_item:
+            selected_docs.append(doc_item)
+
+    if not selected_docs:
+        return response(404, {"message": "No selected documents were found"})
+
+    primary_doc = selected_docs[0]
+    fallback_summary_item = get_summary(user_id, primary_doc.get("doc_id"))
+    fallback_summary_text = (fallback_summary_item or {}).get("summary") or summary_text_for(
+        primary_doc.get("title", "uploaded.pdf")
+    )
+
+    fallback_concepts = []
+    for doc in selected_docs:
+        for concept in doc.get("concepts", []):
+            if concept not in fallback_concepts:
+                fallback_concepts.append(concept)
+    fallback_concepts = fallback_concepts[:5] or testable_concepts_for([])
+
+    summary_text = fallback_summary_text
+    testable_concepts = (
+        (fallback_summary_item or {}).get("testable_concepts") or fallback_concepts
+    )
+
+    if BEDROCK_KNOWLEDGE_BASE_ID:
+        try:
+            kb_summary = summarize_knowledge_base(
+                question="Create a concise study summary and identify testable concepts.",
+                knowledge_base_id=BEDROCK_KNOWLEDGE_BASE_ID,
+                selected_doc_ids=[item.get("doc_id") for item in selected_docs if item.get("doc_id")],
+                fallback_concepts=fallback_concepts,
+            )
+            summary_text = kb_summary.get("summary") or summary_text
+            testable_concepts = kb_summary.get("testable_concepts") or testable_concepts
+        except Exception:
+            pass
+
+    return response(
+        200,
+        {
+            "doc_id": primary_doc.get("doc_id"),
+            "selected_doc_ids": [item.get("doc_id") for item in selected_docs if item.get("doc_id")],
+            "summary": summary_text,
+            "testable_concepts": testable_concepts[:5],
+        },
+    )
 
 
 def handle_quiz(event):
     payload = parse_json_body(event)
-    user_id = payload.get("user_id") or DEMO_USER_ID
-    doc_id = payload.get("doc_id")
+    user_id = payload.get("user_id") or get_user_id(event, payload)
+    selected_doc_ids = normalize_doc_ids(payload)
+    difficulty = str(payload.get("difficulty") or "medium").lower()
+    requested_count = payload.get("count", 5)
 
-    if not doc_id:
-        return response(400, {"message": "doc_id is required"})
+    if not selected_doc_ids:
+        return response(400, {"message": "selected_doc_ids (or doc_id) is required"})
 
-    doc_item = ensure_document_ready(user_id, doc_id)
-    if not doc_item:
-        return response(404, {"message": "Document not found"})
+    selected_docs = []
+    for doc_id in selected_doc_ids:
+        doc_item = ensure_document_ready(user_id, doc_id)
+        if doc_item:
+            selected_docs.append(doc_item)
 
-    quiz_item = get_quiz(user_id, doc_id)
-    if not quiz_item:
-        questions = generate_quiz_questions(doc_item.get("concepts") or concepts_for(doc_item.get("title")))
-        quiz_item = {
-            "PK": pk_user(user_id),
-            "SK": sk_quiz(doc_id),
+    if not selected_docs:
+        return response(404, {"message": "No selected documents were found"})
+
+    primary_doc = selected_docs[0]
+    doc_id = primary_doc.get("doc_id")
+
+    fallback_concepts = []
+    for doc in selected_docs:
+        for concept in doc.get("concepts", []):
+            if concept not in fallback_concepts:
+                fallback_concepts.append(concept)
+    fallback_concepts = fallback_concepts[:10] or concepts_for(primary_doc.get("title"))
+
+    count = max(5, min(10, int(requested_count or 5)))
+    if difficulty == "easy":
+        count = max(5, min(count, 7))
+    elif difficulty == "hard":
+        count = min(10, max(count, 7))
+
+    questions = []
+    if BEDROCK_KNOWLEDGE_BASE_ID:
+        try:
+            questions = generate_quiz_from_kb(
+                knowledge_base_id=BEDROCK_KNOWLEDGE_BASE_ID,
+                selected_doc_ids=[item.get("doc_id") for item in selected_docs if item.get("doc_id")],
+                fallback_concepts=fallback_concepts,
+                count=count,
+            )
+        except Exception:
+            questions = []
+
+    if not questions:
+        questions = generate_fallback_quiz(fallback_concepts, count=count)
+
+    quiz_item = {
+        "PK": pk_user(user_id),
+        "SK": sk_quiz(doc_id),
+        "doc_id": doc_id,
+        "selected_doc_ids": [item.get("doc_id") for item in selected_docs if item.get("doc_id")],
+        "questions": questions,
+        "generated_at": now_iso(),
+    }
+    TABLE.put_item(Item=quiz_item)
+
+    return response(
+        200,
+        {
             "doc_id": doc_id,
+            "selected_doc_ids": [item.get("doc_id") for item in selected_docs if item.get("doc_id")],
             "questions": questions,
-            "generated_at": now_iso(),
-        }
-        TABLE.put_item(Item=quiz_item)
-
-    return response(200, {"doc_id": doc_id, "questions": quiz_item.get("questions", [])})
+        },
+    )
 
 
 def handle_dashboard(event):
@@ -742,6 +875,8 @@ def route_request(event):
         return handle_documents_list(event)
     if method == "POST" and path == "/ask":
         return handle_ask(event)
+    if method == "POST" and path == "/summary":
+        return handle_summary(event)
     if method == "POST" and path == "/quiz":
         return handle_quiz(event)
     if method == "GET" and path == "/dashboard":
