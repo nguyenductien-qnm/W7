@@ -4,8 +4,11 @@ import os
 import re
 import time
 import uuid
+import zipfile
 from datetime import datetime, timezone
+from pathlib import PurePosixPath
 from urllib.parse import unquote_plus
+from xml.etree import ElementTree as ET
 
 import boto3
 
@@ -19,6 +22,16 @@ try:
 except Exception:  # pragma: no cover
     PdfReader = None
 
+try:
+    from docx import Document as DocxDocument
+except Exception:  # pragma: no cover
+    DocxDocument = None
+
+try:
+    from pptx import Presentation
+except Exception:  # pragma: no cover
+    Presentation = None
+
 
 AWS_REGION = os.environ.get("AWS_REGION", "ap-southeast-1")
 DOCUMENTS_TABLE = os.environ.get("DOCUMENTS_TABLE", "StudyBotDocuments")
@@ -27,6 +40,7 @@ BEDROCK_KNOWLEDGE_BASE_ID = os.environ.get("BEDROCK_KNOWLEDGE_BASE_ID", "")
 BEDROCK_DATA_SOURCE_ID = os.environ.get("BEDROCK_DATA_SOURCE_ID", "")
 KB_PROCESSED_PREFIX = os.environ.get("KB_PROCESSED_PREFIX", "documents/processed")
 USE_TEXTRACT_FALLBACK = os.environ.get("USE_TEXTRACT_FALLBACK", "true").lower() == "true"
+SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".md", ".markdown", ".txt", ".pptx"}
 
 
 s3 = boto3.client("s3", region_name=AWS_REGION)
@@ -40,8 +54,8 @@ def now_iso():
 
 
 def parse_object_key(key):
-    # Expected upload key: documents/{user_id}/{doc_id}/{filename}
-    match = re.match(r"^documents/(?P<user_id>[^/]+)/(?P<doc_id>[^/]+)/(?P<filename>.+)$", key)
+    # Expected upload key: documents/raw/{user_id}/{doc_id}/{filename}
+    match = re.match(r"^documents/raw/(?P<user_id>[^/]+)/(?P<doc_id>[^/]+)/(?P<filename>.+)$", key)
     if not match:
         return None
     return match.groupdict()
@@ -113,6 +127,209 @@ def extract_with_pypdf(pdf_bytes):
     return {"ok": bool(text and density >= 90), "text": text, "page_count": len(reader.pages), "density": density}
 
 
+def decode_text_bytes(file_bytes):
+    for encoding in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+        try:
+            return file_bytes.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return file_bytes.decode("utf-8", errors="replace")
+
+
+def extract_plain_text(file_bytes):
+    text = decode_text_bytes(file_bytes).strip()
+    return {"ok": bool(text), "text": text}
+
+
+def iter_docx_table_text(table):
+    for row in table.rows:
+        cells = [cell.text.strip() for cell in row.cells if cell.text and cell.text.strip()]
+        if cells:
+            yield " | ".join(cells)
+
+
+def extract_with_python_docx(file_bytes):
+    if not DocxDocument:
+        return {"ok": False, "reason": "python_docx_not_installed"}
+
+    try:
+        document = DocxDocument(io.BytesIO(file_bytes))
+    except Exception:
+        return {"ok": False, "reason": "python_docx_parse_failed"}
+
+    parts = []
+    for paragraph in document.paragraphs:
+        text = paragraph.text.strip()
+        if text:
+            parts.append(text)
+    for table in document.tables:
+        parts.extend(iter_docx_table_text(table))
+
+    text = "\n\n".join(parts).strip()
+    return {"ok": bool(text), "text": text}
+
+
+def local_name(tag):
+    return tag.rsplit("}", 1)[-1]
+
+
+def xml_text_blocks(xml_bytes, paragraph_tag="p"):
+    root = ET.fromstring(xml_bytes)
+    blocks = []
+    for node in root.iter():
+        if local_name(node.tag) != paragraph_tag:
+            continue
+        texts = []
+        for child in node.iter():
+            if local_name(child.tag) == "t" and child.text:
+                texts.append(child.text)
+        block = "".join(texts).strip()
+        if block:
+            blocks.append(block)
+    return blocks
+
+
+def extract_docx_from_zip(file_bytes):
+    parts = []
+    try:
+        with zipfile.ZipFile(io.BytesIO(file_bytes)) as archive:
+            for name in (
+                "word/document.xml",
+                "word/footnotes.xml",
+                "word/endnotes.xml",
+            ):
+                if name in archive.namelist():
+                    parts.extend(xml_text_blocks(archive.read(name)))
+    except (zipfile.BadZipFile, ET.ParseError):
+        return {"ok": False, "reason": "docx_zip_parse_failed"}
+
+    text = "\n\n".join(parts).strip()
+    return {"ok": bool(text), "text": text}
+
+
+def extract_docx_text(file_bytes):
+    extraction = extract_with_python_docx(file_bytes)
+    if extraction.get("ok"):
+        extraction["mode"] = "python-docx"
+        return extraction
+
+    extraction = extract_docx_from_zip(file_bytes)
+    if extraction.get("ok"):
+        extraction["mode"] = "docx-xml"
+    return extraction
+
+
+def iter_pptx_shape_text(shape):
+    if getattr(shape, "has_text_frame", False) and shape.text_frame:
+        text = shape.text_frame.text.strip()
+        if text:
+            yield text
+
+    if getattr(shape, "has_table", False):
+        for row in shape.table.rows:
+            cells = [cell.text.strip() for cell in row.cells if cell.text and cell.text.strip()]
+            if cells:
+                yield " | ".join(cells)
+
+    if hasattr(shape, "shapes"):
+        for child in shape.shapes:
+            yield from iter_pptx_shape_text(child)
+
+
+def extract_with_python_pptx(file_bytes):
+    if not Presentation:
+        return {"ok": False, "reason": "python_pptx_not_installed"}
+
+    try:
+        presentation = Presentation(io.BytesIO(file_bytes))
+    except Exception:
+        return {"ok": False, "reason": "python_pptx_parse_failed"}
+
+    slides = []
+    for index, slide in enumerate(presentation.slides, start=1):
+        slide_parts = []
+        for shape in slide.shapes:
+            slide_parts.extend(iter_pptx_shape_text(shape))
+        if slide_parts:
+            slides.append(f"Slide {index}\n" + "\n".join(slide_parts))
+
+    text = "\n\n".join(slides).strip()
+    return {"ok": bool(text), "text": text, "slide_count": len(presentation.slides)}
+
+
+def extract_pptx_from_zip(file_bytes):
+    slides = []
+    try:
+        with zipfile.ZipFile(io.BytesIO(file_bytes)) as archive:
+            slide_names = sorted(
+                [name for name in archive.namelist() if re.match(r"^ppt/slides/slide\d+\.xml$", name)],
+                key=lambda value: int(re.search(r"slide(\d+)\.xml$", value).group(1)),
+            )
+            for index, name in enumerate(slide_names, start=1):
+                blocks = xml_text_blocks(archive.read(name))
+                if blocks:
+                    slides.append(f"Slide {index}\n" + "\n".join(blocks))
+    except (zipfile.BadZipFile, ET.ParseError):
+        return {"ok": False, "reason": "pptx_zip_parse_failed"}
+
+    text = "\n\n".join(slides).strip()
+    return {"ok": bool(text), "text": text, "slide_count": len(slides)}
+
+
+def extract_pptx_text(file_bytes):
+    extraction = extract_with_python_pptx(file_bytes)
+    if extraction.get("ok"):
+        extraction["mode"] = "python-pptx"
+        return extraction
+
+    extraction = extract_pptx_from_zip(file_bytes)
+    if extraction.get("ok"):
+        extraction["mode"] = "pptx-xml"
+    return extraction
+
+
+def extract_pdf_text(file_bytes, bucket, key):
+    extraction_mode = "pdfplumber"
+    extraction = extract_with_pdfplumber(file_bytes)
+
+    if not extraction.get("ok"):
+        extraction_mode = "pypdf"
+        extraction = extract_with_pypdf(file_bytes)
+
+    if (not extraction.get("ok") or extraction.get("scanned_like") or extraction.get("table_poor")) and USE_TEXTRACT_FALLBACK:
+        extraction_mode = "textract"
+        textract_result = extract_with_textract(bucket, key)
+        extraction = {
+            "ok": bool(textract_result.get("text")),
+            "text": textract_result.get("text", ""),
+            "textract_job_id": textract_result.get("job_id"),
+        }
+
+    extraction["mode"] = extraction_mode
+    return extraction
+
+
+def extract_document_text(file_bytes, filename, bucket, key):
+    extension = PurePosixPath(filename).suffix.lower()
+    if extension not in SUPPORTED_EXTENSIONS:
+        return {"ok": False, "reason": "unsupported_file_type", "file_type": extension or "unknown"}
+
+    if extension == ".pdf":
+        extraction = extract_pdf_text(file_bytes, bucket, key)
+    elif extension in {".txt", ".md", ".markdown"}:
+        extraction = extract_plain_text(file_bytes)
+        extraction["mode"] = extension.lstrip(".")
+    elif extension == ".docx":
+        extraction = extract_docx_text(file_bytes)
+    elif extension == ".pptx":
+        extraction = extract_pptx_text(file_bytes)
+    else:
+        extraction = {"ok": False, "reason": "unsupported_file_type"}
+
+    extraction["file_type"] = extension.lstrip(".")
+    return extraction
+
+
 def extract_with_textract(bucket, key):
     job = textract.start_document_text_detection(
         DocumentLocation={"S3Object": {"Bucket": bucket, "Name": key}}
@@ -145,15 +362,46 @@ def extract_with_textract(bucket, key):
     return {"text": "\n".join(lines).strip(), "job_id": job_id}
 
 
+def delete_processed_objects(bucket, user_id, doc_id):
+    processed_root = KB_PROCESSED_PREFIX.rstrip("/")
+    legacy_key = f"{processed_root}/{user_id}/{doc_id}.txt"
+    chunk_prefix = f"{processed_root}/{user_id}/{doc_id}/"
+    keys = [legacy_key]
+
+    token = None
+    while True:
+        kwargs = {"Bucket": bucket, "Prefix": chunk_prefix}
+        if token:
+            kwargs["ContinuationToken"] = token
+        response_data = s3.list_objects_v2(**kwargs)
+        keys.extend([item["Key"] for item in response_data.get("Contents", [])])
+        token = response_data.get("NextContinuationToken")
+        if not token:
+            break
+
+    for index in range(0, len(keys), 1000):
+        batch = keys[index:index + 1000]
+        if batch:
+            s3.delete_objects(Bucket=bucket, Delete={"Objects": [{"Key": key} for key in batch], "Quiet": True})
+
+
 def upload_processed_text(bucket, user_id, doc_id, text):
-    processed_key = f"{KB_PROCESSED_PREFIX.rstrip('/')}/{user_id}/{doc_id}.txt"
+    processed_root = KB_PROCESSED_PREFIX.rstrip("/")
+    processed_key = f"{processed_root}/{user_id}/{doc_id}.txt"
+    delete_processed_objects(bucket, user_id, doc_id)
+
     s3.put_object(
         Bucket=bucket,
         Key=processed_key,
         Body=text.encode("utf-8"),
         ContentType="text/plain; charset=utf-8",
     )
-    return processed_key
+
+    return {
+        "key": processed_key,
+        "prefix": processed_key,
+        "size_bytes": len(text.encode("utf-8")),
+    }
 
 
 def start_kb_ingestion():
@@ -163,7 +411,7 @@ def start_kb_ingestion():
         knowledgeBaseId=BEDROCK_KNOWLEDGE_BASE_ID,
         dataSourceId=BEDROCK_DATA_SOURCE_ID,
         clientToken=str(uuid.uuid4()),
-        description="ProcessPdfLambda ingestion trigger",
+        description="Document processing Lambda ingestion trigger",
     )
     return response_data.get("ingestionJob", {})
 
@@ -189,29 +437,39 @@ def process_record(record):
     doc_id = parsed["doc_id"]
     filename = parsed["filename"]
 
-    update_doc(user_id, doc_id, kb_status="PROCESSING", processing_started_at=now_iso(), title=filename)
+    update_doc(
+        user_id,
+        doc_id,
+        kb_status="PROCESSING",
+        processing_started_at=now_iso(),
+        title=filename,
+        raw_s3_key=key,
+    )
+
+    extension = PurePosixPath(filename).suffix.lower()
+    if extension not in SUPPORTED_EXTENSIONS:
+        update_doc(
+            user_id,
+            doc_id,
+            kb_status="FAILED",
+            failure_reason="unsupported_file_type",
+            processed_at=now_iso(),
+        )
+        return {"doc_id": doc_id, "status": "FAILED", "reason": "unsupported_file_type", "file_type": extension or "unknown"}
 
     obj = s3.get_object(Bucket=bucket, Key=key)
-    pdf_bytes = obj["Body"].read()
-
-    extraction_mode = "pdfplumber"
-    extraction = extract_with_pdfplumber(pdf_bytes)
-
-    if not extraction.get("ok"):
-        extraction_mode = "pypdf"
-        extraction = extract_with_pypdf(pdf_bytes)
-
-    if (not extraction.get("ok") or extraction.get("scanned_like") or extraction.get("table_poor")) and USE_TEXTRACT_FALLBACK:
-        extraction_mode = "textract"
-        textract_result = extract_with_textract(bucket, key)
-        extraction = {"ok": bool(textract_result.get("text")), "text": textract_result.get("text", ""), "textract_job_id": textract_result.get("job_id")}
+    file_bytes = obj["Body"].read()
+    extraction = extract_document_text(file_bytes, filename, bucket, key)
+    extraction_mode = extraction.get("mode", "unknown")
 
     text = (extraction.get("text") or "").strip()
     if not text:
-        update_doc(user_id, doc_id, kb_status="FAILED", failure_reason="text_extraction_failed", processed_at=now_iso())
-        return {"doc_id": doc_id, "status": "FAILED", "reason": "text_extraction_failed"}
+        reason = extraction.get("reason", "text_extraction_failed")
+        update_doc(user_id, doc_id, kb_status="FAILED", failure_reason=reason, processed_at=now_iso())
+        return {"doc_id": doc_id, "status": "FAILED", "reason": reason, "file_type": extraction.get("file_type", extension or "unknown")}
 
-    processed_key = upload_processed_text(bucket, user_id, doc_id, text)
+    processed_upload = upload_processed_text(bucket, user_id, doc_id, text)
+    processed_key = processed_upload["key"]
     ingestion_job = start_kb_ingestion()
 
     update_doc(
@@ -219,6 +477,13 @@ def process_record(record):
         doc_id,
         kb_status="PROCESSING",
         extraction_mode=extraction_mode,
+        file_type=extraction.get("file_type", extension.lstrip(".")),
+        page_count=extraction.get("page_count", 0),
+        slide_count=extraction.get("slide_count", 0),
+        processed_text_size_bytes=processed_upload["size_bytes"],
+        processed_s3_prefix=processed_upload["prefix"],
+        raw_s3_key=key,
+        processed_s3_key=processed_key,
         processed_text_s3_key=processed_key,
         ingestion_job_id=ingestion_job.get("ingestionJobId", ""),
         ingestion_status=ingestion_job.get("status", "STARTING"),
@@ -229,6 +494,7 @@ def process_record(record):
         "doc_id": doc_id,
         "status": "PROCESSING",
         "extraction_mode": extraction_mode,
+        "file_type": extraction.get("file_type", extension.lstrip(".")),
         "processed_text_s3_key": processed_key,
         "ingestion_job_id": ingestion_job.get("ingestionJobId", ""),
         "ingestion_status": ingestion_job.get("status", "STARTING"),

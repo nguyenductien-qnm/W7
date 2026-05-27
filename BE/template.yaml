@@ -1,10 +1,10 @@
-AWSTemplateFormatVersion: '2010-09-09'
+AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
 Description: StudyBot backend (Lambda + API Gateway + DynamoDB)
 
 Globals:
   Function:
-    Runtime: python3.9
+    Runtime: python3.12
     Timeout: 30
     MemorySize: 256
 
@@ -52,8 +52,9 @@ Resources:
           INGESTION_MODE: mock
           UPLOADS_BUCKET_NAME: studybotdatastack-uploadbucketd2c1da78-2cpeowy02vjk
           BEDROCK_KNOWLEDGE_BASE_ID: LI32IWLOB5
-          BEDROCK_DATA_SOURCE_ID: BZ8NQGYFCX
+          BEDROCK_DATA_SOURCE_ID: V0ISBKEMXT
           VECTOR_INDEX_ARN: arn:aws:s3vectors:ap-southeast-1:589077667575:bucket/studybot-vectors-589077667575-ap-southeast-1/index/studybot-kb-index
+          KB_PROCESSED_PREFIX: documents/processed
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref DocumentsTable
@@ -68,7 +69,7 @@ Resources:
                 - bedrock:GetIngestionJob
               Resource:
                 - arn:aws:bedrock:ap-southeast-1:589077667575:knowledge-base/LI32IWLOB5
-                - arn:aws:bedrock:ap-southeast-1:589077667575:knowledge-base/LI32IWLOB5/data-source/BZ8NQGYFCX
+                - arn:aws:bedrock:ap-southeast-1:589077667575:knowledge-base/LI32IWLOB5/data-source/V0ISBKEMXT
       Events:
         LoginApi:
           Type: HttpApi

@@ -442,7 +442,7 @@ def handle_upload_url(event):
     filename = safe_filename(payload.get("filename") or payload.get("title") or "uploaded.pdf")
     content_type = payload.get("content_type") or "application/octet-stream"
     doc_id = payload.get("doc_id") or f"doc_{uuid.uuid4().hex[:10]}"
-    s3_key = payload.get("s3_key") or f"documents/{user_id}/{doc_id}/{filename}"
+    s3_key = payload.get("s3_key") or f"documents/raw/{user_id}/{doc_id}/{filename}"
 
     ensure_profile(user_id, f"{user_id}@studybot.com")
 
@@ -452,6 +452,7 @@ def handle_upload_url(event):
         "doc_id": doc_id,
         "title": filename,
         "s3_key": s3_key,
+        "raw_s3_key": s3_key,
         "kb_status": "UPLOADING",
         "uploaded_at": now_iso(),
         "page_count": 0,

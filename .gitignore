@@ -8,3 +8,4 @@ infra/cdk.out/
 *.egg-info/
 .cdk/
 Library/
+studybot/

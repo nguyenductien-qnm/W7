@@ -25,7 +25,7 @@ class StudyBotInfraStack(Stack):
             "studybot-vectors-589077667575-ap-southeast-1/index/studybot-kb-index"
         )
         knowledge_base_id = "LI32IWLOB5"
-        data_source_id = "BZ8NQGYFCX"
+        data_source_id = "V0ISBKEMXT"
         kb_arn = (
             "arn:aws:bedrock:ap-southeast-1:589077667575:"
             f"knowledge-base/{knowledge_base_id}"
@@ -48,22 +48,36 @@ class StudyBotInfraStack(Stack):
         )
 
         backend_src_path = str(Path(__file__).resolve().parents[2] / "BE" / "src")
+        backend_lambda_code = lambda_.Code.from_asset(
+            backend_src_path,
+            exclude=[
+                ".env",
+                "__pycache__",
+                "*.pyc",
+                "*.pyo",
+                ".pytest_cache",
+            ],
+            bundling={
+                "image": lambda_.Runtime.PYTHON_3_12.bundling_image,
+                "command": [
+                    "bash",
+                    "-c",
+                    (
+                        "python -m pip install -r /asset-input/requirements.txt -t /asset-output "
+                        "&& cp -r /asset-input/. /asset-output "
+                        "&& find /asset-output -type d -name __pycache__ -prune -exec rm -rf {} + "
+                        "&& rm -f /asset-output/.env"
+                    ),
+                ],
+            },
+        )
 
         api_lambda = lambda_.Function(
             self,
             "StudyBotApiLambda",
             runtime=lambda_.Runtime.PYTHON_3_12,
             handler="app.lambda_handler",
-            code=lambda_.Code.from_asset(
-                backend_src_path,
-                exclude=[
-                    ".env",
-                    "__pycache__",
-                    "*.pyc",
-                    "*.pyo",
-                    ".pytest_cache",
-                ],
-            ),
+            code=backend_lambda_code,
             timeout=Duration.seconds(30),
             memory_size=512,
             environment={
@@ -81,16 +95,7 @@ class StudyBotInfraStack(Stack):
             "ProcessPdfLambda",
             runtime=lambda_.Runtime.PYTHON_3_12,
             handler="process_pdf_lambda.lambda_handler",
-            code=lambda_.Code.from_asset(
-                backend_src_path,
-                exclude=[
-                    ".env",
-                    "__pycache__",
-                    "*.pyc",
-                    "*.pyo",
-                    ".pytest_cache",
-                ],
-            ),
+            code=backend_lambda_code,
             timeout=Duration.minutes(5),
             memory_size=1024,
             environment={
@@ -130,11 +135,12 @@ class StudyBotInfraStack(Stack):
             )
         )
 
-        uploads_bucket.add_event_notification(
-            s3.EventType.OBJECT_CREATED,
-            s3n.LambdaDestination(process_pdf_lambda),
-            s3.NotificationKeyFilter(prefix="documents/"),
-        )
+        for suffix in [".pdf", ".docx", ".md", ".markdown", ".txt", ".pptx"]:
+            uploads_bucket.add_event_notification(
+                s3.EventType.OBJECT_CREATED,
+                s3n.LambdaDestination(process_pdf_lambda),
+                s3.NotificationKeyFilter(prefix="documents/raw/", suffix=suffix),
+            )
 
         http_api = apigatewayv2.HttpApi(
             self,

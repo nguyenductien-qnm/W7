@@ -1,0 +1,7 @@
+{
+  "type": "S3",
+  "s3Configuration": {
+    "bucketArn": "arn:aws:s3:::studybotdatastack-uploadbucketd2c1da78-2cpeowy02vjk",
+    "inclusionPrefixes": ["documents/processed/"]
+  }
+}
