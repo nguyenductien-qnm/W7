@@ -3,6 +3,7 @@ from aws_cdk import (
     CfnOutput,
     CfnParameter,
     Duration,
+    ILocalBundling,
     Stack,
 )
 from aws_cdk import aws_apigatewayv2 as apigatewayv2
@@ -10,10 +11,12 @@ from aws_cdk import aws_apigatewayv2_integrations as apigatewayv2_integrations
 from aws_cdk import aws_certificatemanager as acm
 from aws_cdk import aws_cloudfront as cloudfront
 from aws_cdk import aws_cloudfront_origins as origins
+from aws_cdk import aws_cloudwatch as cloudwatch
 from aws_cdk import aws_dynamodb as dynamodb
 from aws_cdk import aws_ec2 as ec2
 from aws_cdk import aws_iam as iam
 from aws_cdk import aws_lambda as lambda_
+from aws_cdk import aws_logs as logs
 from aws_cdk import aws_route53 as route53
 from aws_cdk import aws_route53_targets as route53_targets
 from aws_cdk import aws_s3 as s3
@@ -21,6 +24,46 @@ from aws_cdk import aws_s3_deployment as s3deploy
 from aws_cdk import aws_s3_notifications as s3n
 from constructs import Construct
 from pathlib import Path
+import jsii
+import shutil
+
+
+@jsii.implements(ILocalBundling)
+class ReuseBackendBundle:
+    def __init__(self, backend_src_path: str) -> None:
+        self.backend_src_path = Path(backend_src_path)
+
+    def try_bundle(self, output_dir: str, *_args, **_kwargs) -> bool:
+        output_path = Path(output_dir)
+        cdk_out = output_path.parent
+        requirements = (self.backend_src_path / "requirements.txt").read_text(encoding="utf-8")
+        candidates = [
+            path
+            for path in cdk_out.glob("asset.*")
+            if path.is_dir()
+            and not path.name.endswith("-building")
+            and (path / "requirements.txt").exists()
+            and (path / "requirements.txt").read_text(encoding="utf-8") == requirements
+            and (path / "boto3").exists()
+        ]
+        if not candidates:
+            return False
+        candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+        shutil.copytree(candidates[0], output_path, dirs_exist_ok=True)
+        for source in self.backend_src_path.iterdir():
+            target = output_path / source.name
+            if source.name in {".env", "__pycache__"}:
+                continue
+            if source.is_dir():
+                shutil.copytree(source, target, dirs_exist_ok=True)
+            else:
+                shutil.copy2(source, target)
+        for pycache in output_path.rglob("__pycache__"):
+            shutil.rmtree(pycache, ignore_errors=True)
+        env_file = output_path / ".env"
+        if env_file.exists():
+            env_file.unlink()
+        return True
 
 
 class StudyBotInfraStack(Stack):
@@ -29,6 +72,7 @@ class StudyBotInfraStack(Stack):
 
         uploads_bucket_name = "studybotdatastack-uploadbucketd2c1da78-2cpeowy02vjk"
         documents_table_name = "StudyBotDocuments"
+        knowledge_base_role_name = "StudyBotBedrockStack-KnowledgeBaseRoleA2B317B9-UycR9VjqexH0"
         root_domain_name = "nguyenductien.cloud"
         api_domain_name = f"api.{root_domain_name}"
         vector_index_arn = (
@@ -79,6 +123,12 @@ class StudyBotInfraStack(Stack):
             self,
             "StudyBotDocuments",
             table_name=documents_table_name,
+        )
+        knowledge_base_role = iam.Role.from_role_name(
+            self,
+            "StudyBotKnowledgeBaseRole",
+            role_name=knowledge_base_role_name,
+            mutable=True,
         )
         hosted_zone = route53.HostedZone.from_lookup(
             self,
@@ -188,6 +238,7 @@ class StudyBotInfraStack(Stack):
             ],
             bundling={
                 "image": lambda_.Runtime.PYTHON_3_12.bundling_image,
+                "local": ReuseBackendBundle(backend_src_path),
                 "command": [
                     "bash",
                     "-c",
@@ -426,6 +477,15 @@ class StudyBotInfraStack(Stack):
                 ],
             )
         )
+        knowledge_base_role.add_to_principal_policy(
+            iam.PolicyStatement(
+                actions=["s3:GetObject"],
+                resources=[
+                    f"arn:aws:s3:::{uploads_bucket_name}/processed/*",
+                    f"arn:aws:s3:::{uploads_bucket_name}/documents/processed/*",
+                ],
+            )
+        )
         process_pdf_lambda.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["s3:ListBucket"],
@@ -505,6 +565,8 @@ class StudyBotInfraStack(Stack):
                 allow_methods=[
                     apigatewayv2.CorsHttpMethod.GET,
                     apigatewayv2.CorsHttpMethod.POST,
+                    apigatewayv2.CorsHttpMethod.PUT,
+                    apigatewayv2.CorsHttpMethod.PATCH,
                     apigatewayv2.CorsHttpMethod.DELETE,
                     apigatewayv2.CorsHttpMethod.OPTIONS,
                 ],
@@ -612,6 +674,11 @@ class StudyBotInfraStack(Stack):
             integration=planner_integration,
         )
         http_api.add_routes(
+            path="/planner/clarify",
+            methods=[apigatewayv2.HttpMethod.POST],
+            integration=planner_integration,
+        )
+        http_api.add_routes(
             path="/planner/{plan_id}",
             methods=[
                 apigatewayv2.HttpMethod.GET,
@@ -628,6 +695,11 @@ class StudyBotInfraStack(Stack):
         )
         http_api.add_routes(
             path="/history",
+            methods=[apigatewayv2.HttpMethod.GET],
+            integration=history_integration,
+        )
+        http_api.add_routes(
+            path="/dashboard",
             methods=[apigatewayv2.HttpMethod.GET],
             integration=history_integration,
         )
@@ -886,6 +958,117 @@ class StudyBotInfraStack(Stack):
             history_lambda,
             [("get_history", "Get UI history for the active study session.")],
         )
+
+        dashboard = cloudwatch.Dashboard(
+            self,
+            "StudyBotOperationsDashboard",
+            dashboard_name="StudyBot-W7-Operations",
+        )
+        lambda_functions = [
+            upload_lambda,
+            process_pdf_lambda,
+            qa_lambda,
+            summary_lambda,
+            quiz_lambda,
+            planner_lambda,
+            history_lambda,
+        ]
+        lambda_error_metrics = [fn.metric_errors(period=Duration.minutes(5)) for fn in lambda_functions]
+        duration_metrics = [
+            process_pdf_lambda.metric_duration(statistic="p95", period=Duration.minutes(5)),
+            qa_lambda.metric_duration(statistic="p95", period=Duration.minutes(5)),
+        ]
+        api_5xx_metric = cloudwatch.Metric(
+            namespace="AWS/ApiGateway",
+            metric_name="5xx",
+            dimensions_map={"ApiId": http_api.api_id, "Stage": "$default"},
+            statistic="sum",
+            period=Duration.minutes(5),
+        )
+        ingestion_failure_metric_filter = logs.MetricFilter(
+            self,
+            "StudyBotIngestionFailureMetricFilter",
+            log_group=logs.LogGroup.from_log_group_name(
+                self,
+                "ProcessPdfLambdaLogGroup",
+                f"/aws/lambda/{process_pdf_lambda.function_name}",
+            ),
+            metric_namespace="StudyBot/W7",
+            metric_name="IngestionFailures",
+            filter_pattern=logs.FilterPattern.any_term("FAILED", "failure", "error", "Exception"),
+            metric_value="1",
+            default_value=0,
+        )
+        ingestion_failure_metric = ingestion_failure_metric_filter.metric(
+            statistic="sum",
+            period=Duration.minutes(5),
+        )
+        cloudwatch.Alarm(
+            self,
+            "StudyBotApi5xxAlarm",
+            metric=api_5xx_metric,
+            threshold=1,
+            evaluation_periods=1,
+            alarm_description="Sensitive W7 demo alarm: API Gateway returned at least one 5XX in 5 minutes.",
+        )
+        for fn in lambda_functions:
+            cloudwatch.Alarm(
+                self,
+                f"{fn.node.id}ErrorsAlarm",
+                metric=fn.metric_errors(period=Duration.minutes(5)),
+                threshold=1,
+                evaluation_periods=1,
+                alarm_description=f"Sensitive W7 demo alarm: {fn.function_name} reported an error.",
+            )
+        cloudwatch.Alarm(
+            self,
+            "StudyBotQaDurationAlarm",
+            metric=qa_lambda.metric_duration(statistic="p95", period=Duration.minutes(5)),
+            threshold=45000,
+            evaluation_periods=1,
+            alarm_description="Sensitive W7 demo alarm: Q&A p95 duration exceeded 45 seconds.",
+        )
+        cloudwatch.Alarm(
+            self,
+            "StudyBotIngestionDurationAlarm",
+            metric=process_pdf_lambda.metric_duration(statistic="p95", period=Duration.minutes(5)),
+            threshold=240000,
+            evaluation_periods=1,
+            alarm_description="Sensitive W7 demo alarm: ingestion p95 duration exceeded 4 minutes.",
+        )
+        cloudwatch.Alarm(
+            self,
+            "StudyBotIngestionFailureAlarm",
+            metric=ingestion_failure_metric,
+            threshold=1,
+            evaluation_periods=1,
+            alarm_description="Sensitive W7 demo alarm: ingestion log output contained a failure signal.",
+        )
+        dashboard.add_widgets(
+            cloudwatch.GraphWidget(
+                title="API Gateway 5XX",
+                left=[api_5xx_metric],
+                width=12,
+            ),
+            cloudwatch.GraphWidget(
+                title="Lambda Errors",
+                left=lambda_error_metrics,
+                width=12,
+            ),
+        )
+        dashboard.add_widgets(
+            cloudwatch.GraphWidget(
+                title="Ingestion and Q&A p95 Duration",
+                left=duration_metrics,
+                width=12,
+            ),
+            cloudwatch.GraphWidget(
+                title="Ingestion Failure Log Signals",
+                left=[ingestion_failure_metric],
+                width=12,
+            ),
+        )
+
         CfnOutput(self, "UploadsBucketName", value=uploads_bucket.bucket_name)
         CfnOutput(self, "DocumentsTableName", value=documents_table.table_name)
         CfnOutput(self, "VectorIndexArn", value=vector_index_arn)
@@ -906,6 +1089,8 @@ class StudyBotInfraStack(Stack):
         CfnOutput(self, "QuizLambdaName", value=quiz_lambda.function_name)
         CfnOutput(self, "PlannerLambdaName", value=planner_lambda.function_name)
         CfnOutput(self, "HistoryLambdaName", value=history_lambda.function_name)
+        CfnOutput(self, "OperationsDashboardName", value=dashboard.dashboard_name)
+        CfnOutput(self, "IngestionFailureMetricName", value="StudyBot/W7/IngestionFailures")
         CfnOutput(self, "AgentCoreGatewayId", value=agentcore_gateway.ref)
         CfnOutput(self, "AgentCoreGatewayUrl", value=agentcore_gateway.get_att("GatewayUrl").to_string())
         CfnOutput(self, "VpcId", value=studybot_vpc.vpc_id)

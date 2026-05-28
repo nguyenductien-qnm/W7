@@ -1,3 +1,6 @@
+import re
+from datetime import datetime, timedelta, timezone
+
 from core import get_session_id, get_user_id, list_user_items, response
 from tool_contract import is_tool_event, parse_http_response, tool_name_from_event, tool_payload, tool_response
 
@@ -26,6 +29,157 @@ def _is_quiz_history(sk):
 
 def _is_exam_plan_history(sk):
     return str(sk or "").startswith("EXAM_PLAN#TS#")
+
+
+def _parse_days(value, default=7):
+    try:
+        return max(1, min(30, int(value or default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _parse_timestamp(value):
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _event_timestamp(item):
+    return _parse_timestamp(item.get("created_at") or item.get("generated_at") or item.get("updated_at"))
+
+
+def _clean_topic(value):
+    text = re.sub(r"\s+", " ", str(value or "")).strip(" \t\r\n:;,.?\"'")
+    if not text:
+        return ""
+    if len(text) > 90:
+        text = text[:87].rstrip() + "..."
+    return text
+
+
+def _topic_key(value):
+    return re.sub(r"\s+", " ", _clean_topic(value).casefold())
+
+
+def _question_topic(question):
+    explicit = _clean_topic(question.get("topic"))
+    if explicit:
+        return explicit
+    for field in ("source_title", "source_doc_id"):
+        topic = _clean_topic(question.get(field))
+        if topic:
+            return topic
+    text = _clean_topic(question.get("question"))
+    text = re.sub(r"^(what|which|why|how|when)\s+(is|are|does|do|did|can|should)\s+", "", text, flags=re.IGNORECASE)
+    return text or "Quiz question"
+
+
+def _add_topic(topics_by_key, label, source, studied_at):
+    clean = _clean_topic(label)
+    if not clean:
+        return
+    key = _topic_key(clean)
+    existing = topics_by_key.get(key)
+    if not existing:
+        topics_by_key[key] = {
+            "topic": clean,
+            "count": 0,
+            "sources": set(),
+            "last_studied_at": studied_at.isoformat().replace("+00:00", "Z"),
+            "_last_dt": studied_at,
+        }
+        existing = topics_by_key[key]
+    elif len(clean) < len(existing["topic"]) or existing["topic"].islower():
+        existing["topic"] = clean
+    existing["count"] += 1
+    existing["sources"].add(source)
+    if studied_at > existing["_last_dt"]:
+        existing["_last_dt"] = studied_at
+        existing["last_studied_at"] = studied_at.isoformat().replace("+00:00", "Z")
+
+
+def _dashboard_from_items(items, user_id, session_id="all", days=7, now=None):
+    now = now or datetime.now(timezone.utc)
+    since = now - timedelta(days=days)
+    topics_by_key = {}
+    totals = {
+        "topics": 0,
+        "summaries": 0,
+        "quizzes": 0,
+        "flashcards": 0,
+        "questions": 0,
+        "plans": 0,
+    }
+
+    for item in items:
+        if session_id not in ("", "all") and not _same_session(item, session_id):
+            continue
+        studied_at = _event_timestamp(item)
+        if not studied_at or studied_at < since:
+            continue
+
+        sk = str(item.get("SK") or "")
+        if sk.startswith("QUESTION#"):
+            totals["questions"] += 1
+            _add_topic(topics_by_key, item.get("topic") or item.get("question"), "q&a", studied_at)
+            continue
+
+        if _is_summary_history(sk):
+            totals["summaries"] += 1
+            for concept in item.get("testable_concepts") or []:
+                _add_topic(topics_by_key, concept, "summary", studied_at)
+            continue
+
+        if _is_quiz_history(sk):
+            feature = str(item.get("feature") or "quiz").lower()
+            if feature == "flashcards":
+                totals["flashcards"] += 1
+                source = "flashcards"
+            else:
+                totals["quizzes"] += 1
+                source = "quiz"
+            for question in item.get("questions") or []:
+                if isinstance(question, dict):
+                    _add_topic(topics_by_key, _question_topic(question), source, studied_at)
+            continue
+
+        if _is_exam_plan_history(sk):
+            totals["plans"] += 1
+            for task in item.get("tasks") or []:
+                if isinstance(task, dict):
+                    _add_topic(topics_by_key, task.get("topic"), "planning", studied_at)
+            for topic in item.get("weak_topics") or []:
+                _add_topic(topics_by_key, topic, "planning", studied_at)
+
+    topics = []
+    for topic in topics_by_key.values():
+        topics.append(
+            {
+                "topic": topic["topic"],
+                "count": topic["count"],
+                "sources": sorted(topic["sources"]),
+                "last_studied_at": topic["last_studied_at"],
+            }
+        )
+    topics.sort(key=lambda item: (item["last_studied_at"], item["count"]), reverse=True)
+    totals["topics"] = len(topics)
+    return {
+        "user_id": user_id,
+        "session_id": session_id or "all",
+        "window_days": days,
+        "since": since.isoformat().replace("+00:00", "Z"),
+        "topics": topics,
+        "totals": totals,
+    }
 
 
 def _to_message_id(prefix, timestamp, suffix):
@@ -257,9 +411,22 @@ def handle_history(event):
     )
 
 
+def handle_dashboard(event):
+    query = event.get("queryStringParameters") or {}
+    user_id = get_user_id(event)
+    session_id = get_session_id(event) or "all"
+    if session_id == "default" and query.get("session_id") in (None, "", "all"):
+        session_id = "all"
+    days = _parse_days(query.get("days"), default=7)
+    return response(200, _dashboard_from_items(list_user_items(user_id), user_id, session_id, days))
+
+
 def lambda_handler(event, _context):
     try:
         if not is_tool_event(event):
+            path = event.get("rawPath") or event.get("path") or ""
+            if path == "/dashboard":
+                return handle_dashboard(event)
             return handle_history(event)
         payload = tool_payload(event)
         api_event = {
