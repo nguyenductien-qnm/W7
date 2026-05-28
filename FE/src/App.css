@@ -341,6 +341,12 @@ select:focus {
   color: var(--error);
 }
 
+.soft-btn.active {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  color: var(--primary-strong);
+}
+
 .chat-area {
   flex: 1;
   overflow: auto;

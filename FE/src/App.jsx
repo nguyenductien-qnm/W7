@@ -386,6 +386,7 @@ export default function App() {
   );
 
   const [activeFeature, setActiveFeature] = useState("chat");
+  const [plannerOpen, setPlannerOpen] = useState(false);
   const [input, setInput] = useState("");
   const [plusOpen, setPlusOpen] = useState(false);
   const [fileModalOpen, setFileModalOpen] = useState(false);
@@ -624,6 +625,7 @@ export default function App() {
 
   function selectFeature(key) {
     setActiveFeature(key);
+    if (key === "planning") setPlannerOpen(true);
     setPlusOpen(false);
   }
 
@@ -649,6 +651,7 @@ export default function App() {
     try {
       const body = await call(`/planner/${encodeURIComponent(planId)}?session_id=${encodeURIComponent(activeSessionId)}`);
       setActivePlan(body);
+      setPlannerOpen(true);
     } catch (err) {
       showToast(err.message);
     }
@@ -1040,6 +1043,7 @@ export default function App() {
           },
         });
         setActivePlan(body);
+        setPlannerOpen(true);
         await refreshPlans(activeSessionId);
         updateMessage(botId, {
           text: renderPlanText(body),
@@ -1181,6 +1185,15 @@ export default function App() {
             <button className="soft-btn" onClick={() => setFileModalOpen(true)}>
               {selectedDocIds.length === 1 ? "Using 1 doc" : `Using ${selectedDocIds.length} docs`}
             </button>
+            <button
+              className={`soft-btn ${plannerOpen ? "active" : ""}`}
+              onClick={() => {
+                setPlannerOpen((prev) => !prev);
+                if (!plannerOpen) refreshPlans(activeSessionId);
+              }}
+            >
+              Plans
+            </button>
             <button className="soft-btn" onClick={refreshDocs} disabled={busy.docs}>
               {busy.docs ? "Refreshing..." : "Refresh"}
             </button>
@@ -1201,7 +1214,7 @@ export default function App() {
           </div>
         </header>
 
-        {activeFeature === "planning" && (
+        {plannerOpen && (
           <section className="planner-view" aria-label="Exam planner">
             <div className="planner-list">
               <div className="planner-view-head">

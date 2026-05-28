@@ -116,6 +116,26 @@ def _plan_public(item):
     }
 
 
+def _plan_sort_value(item):
+    return item.get("created_at") or item.get("generated_at") or ""
+
+
+def _get_plan_item(user_id, plan_id):
+    latest = TABLE.get_item(Key={"PK": pk_user(user_id), "SK": sk_exam_plan(plan_id)}).get("Item")
+    if latest:
+        return latest
+
+    matches = []
+    for item in list_user_items(user_id):
+        sk = str(item.get("SK") or "")
+        if sk.startswith("EXAM_PLAN#TS#") and item.get("plan_id") == plan_id:
+            matches.append(item)
+    if not matches:
+        return None
+    matches.sort(key=_plan_sort_value, reverse=True)
+    return matches[0]
+
+
 def _ready_session_docs(user_id, session_id):
     docs = []
     for doc in list_documents(user_id):
@@ -397,13 +417,25 @@ def handle_planner(event):
 def handle_planner_list(event):
     user_id = get_user_id(event)
     session_id = get_session_id(event) or "default"
-    plans = []
+    plans_by_id = {}
     for item in list_user_items(user_id):
         sk = str(item.get("SK") or "")
-        if not sk.startswith("EXAM_PLAN#") or sk.startswith("EXAM_PLAN#TS#"):
+        if not sk.startswith("EXAM_PLAN#"):
             continue
         if item.get("session_id", "default") != session_id:
             continue
+        plan_id = item.get("plan_id")
+        if not plan_id:
+            continue
+        existing = plans_by_id.get(plan_id)
+        if existing and not sk.startswith("EXAM_PLAN#TS#"):
+            continue
+        if existing and _plan_sort_value(existing) >= _plan_sort_value(item):
+            continue
+        plans_by_id[plan_id] = item
+
+    plans = []
+    for item in plans_by_id.values():
         public = _plan_public(item)
         public["tasks"] = public["tasks"][:3]
         public["task_count"] = len(item.get("tasks") or [])
@@ -416,7 +448,7 @@ def handle_planner_list(event):
 def handle_planner_detail(event, plan_id):
     user_id = get_user_id(event)
     session_id = get_session_id(event) or "default"
-    item = TABLE.get_item(Key={"PK": pk_user(user_id), "SK": sk_exam_plan(plan_id)}).get("Item")
+    item = _get_plan_item(user_id, plan_id)
     if not item:
         return response(404, {"message": "Plan not found"})
     if item.get("session_id", "default") != session_id:
@@ -427,12 +459,16 @@ def handle_planner_detail(event, plan_id):
 def handle_planner_delete(event, plan_id):
     user_id = get_user_id(event)
     session_id = get_session_id(event) or "default"
-    item = TABLE.get_item(Key={"PK": pk_user(user_id), "SK": sk_exam_plan(plan_id)}).get("Item")
+    item = _get_plan_item(user_id, plan_id)
     if not item:
         return response(404, {"message": "Plan not found"})
     if item.get("session_id", "default") != session_id:
         return response(403, {"message": "Plan does not belong to the active session"})
-    TABLE.delete_item(Key={"PK": pk_user(user_id), "SK": sk_exam_plan(plan_id)})
+    with TABLE.batch_writer() as batch:
+        for existing in list_user_items(user_id):
+            sk = str(existing.get("SK") or "")
+            if existing.get("plan_id") == plan_id and sk.startswith("EXAM_PLAN#"):
+                batch.delete_item(Key={"PK": pk_user(user_id), "SK": sk})
     return response(200, {"deleted": True, "plan_id": plan_id})
 
 
@@ -442,7 +478,7 @@ def handle_planner_recommend_docs(event, plan_id):
     user_id = get_user_id(event, payload)
     session_id = get_session_id(event, payload) or "default"
     limit = _positive_int(payload.get("limit") or query.get("limit"), default=5, minimum=1, maximum=10)
-    item = TABLE.get_item(Key={"PK": pk_user(user_id), "SK": sk_exam_plan(plan_id)}).get("Item")
+    item = _get_plan_item(user_id, plan_id)
     if not item:
         return response(404, {"message": "Plan not found"})
     if item.get("session_id", "default") != session_id:
