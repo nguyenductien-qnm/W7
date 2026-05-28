@@ -5,6 +5,7 @@ import re
 import time
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 from email import policy
 from email.parser import BytesParser
 
@@ -67,11 +68,19 @@ def cors_headers():
     }
 
 
+def _json_default(value):
+    if isinstance(value, Decimal):
+        if value % 1 == 0:
+            return int(value)
+        return float(value)
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
 def response(status_code, body):
     return {
         "statusCode": status_code,
         "headers": {"Content-Type": "application/json", **cors_headers()},
-        "body": json.dumps(body),
+        "body": json.dumps(body, default=_json_default),
     }
 
 
