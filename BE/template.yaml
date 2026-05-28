@@ -324,6 +324,18 @@ Resources:
             ApiId: !Ref StudyBotApi
             Path: /planner/{plan_id}
             Method: GET
+        PlannerUpdateApi:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref StudyBotApi
+            Path: /planner/{plan_id}
+            Method: PUT
+        PlannerPatchApi:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref StudyBotApi
+            Path: /planner/{plan_id}
+            Method: PATCH
         PlannerDeleteApi:
           Type: HttpApi
           Properties:

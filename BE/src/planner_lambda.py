@@ -1,6 +1,10 @@
+import json
+import os
 import re
 import uuid
 from datetime import date, datetime, timedelta, timezone
+
+import boto3
 
 from app import (
     TABLE,
@@ -22,6 +26,13 @@ from tool_contract import parse_http_response, run_tool_handler, tool_name_from_
 
 
 ACTIVITY_SEQUENCE = ("review", "flashcards", "quiz", "practice", "recap")
+AWS_REGION = os.environ.get("AWS_REGION", "ap-southeast-1")
+BEDROCK_GENERATION_MODEL_ID = os.environ.get(
+    "BEDROCK_GENERATION_MODEL_ID",
+    "global.amazon.nova-2-lite-v1:0",
+)
+
+BEDROCK_RUNTIME = boto3.client("bedrock-runtime", region_name=AWS_REGION)
 
 
 def sk_exam_plan(plan_id):
@@ -37,6 +48,138 @@ def _parse_date(value):
         return datetime.strptime(str(value or ""), "%Y-%m-%d").date()
     except ValueError:
         return None
+
+
+def _extract_json_object(text):
+    try:
+        parsed = json.loads(text or "{}")
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        pass
+    match = re.search(r"\{.*\}", text or "", flags=re.DOTALL)
+    if not match:
+        return {}
+    try:
+        parsed = json.loads(match.group(0))
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _invoke_text_model(prompt, max_tokens=450, temperature=0.0):
+    body = {
+        "messages": [{"role": "user", "content": [{"text": prompt}]}],
+        "inferenceConfig": {
+            "maxTokens": max_tokens,
+            "temperature": temperature,
+            "topP": 0.9,
+        },
+    }
+    response_data = BEDROCK_RUNTIME.invoke_model(
+        modelId=BEDROCK_GENERATION_MODEL_ID,
+        contentType="application/json",
+        accept="application/json",
+        body=json.dumps(body),
+    )
+    payload = json.loads(response_data["body"].read().decode("utf-8"))
+    content = (((payload.get("output") or {}).get("message") or {}).get("content") or [])
+    if content and isinstance(content, list):
+        return "\n".join(part.get("text", "") for part in content if isinstance(part, dict)).strip()
+    return str(payload.get("outputText") or payload.get("completion") or "").strip()
+
+
+def _parse_planner_prompt_deterministic(text):
+    prompt = str(text or "")
+    if not prompt.strip():
+        return {}
+    exam_date = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", prompt)
+    daily = re.search(r"(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h)\s*(?:per\s+day|daily|/\s*day)", prompt, re.IGNORECASE)
+    weekly = re.search(r"(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h)\s*(?:per\s+week|weekly|/\s*week)", prompt, re.IGNORECASE)
+    generic_hours = re.search(r"(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h)\b", prompt, re.IGNORECASE)
+    session_length = re.search(r"(\d+)\s*(?:minutes?|mins?|m)\s*(?:sessions?|session length)", prompt, re.IGNORECASE)
+    weak_topics = re.search(r"weak topics?\s*:\s*([^.;]+)", prompt, re.IGNORECASE)
+    excluded_days = re.search(r"(?:exclude|excluded days?)\s*:\s*([^.;]+)", prompt, re.IGNORECASE)
+    target_grade = re.search(r"(?:target grade|goal)\s*:\s*([^.;]+)", prompt, re.IGNORECASE)
+    parsed = {}
+    if exam_date:
+        parsed["exam_date"] = exam_date.group(1)
+    if daily:
+        parsed["daily_study_hours"] = float(daily.group(1))
+    elif weekly:
+        parsed["weekly_study_hours"] = float(weekly.group(1))
+    elif generic_hours:
+        parsed["daily_study_hours"] = float(generic_hours.group(1))
+    if session_length:
+        parsed["preferred_session_length"] = int(session_length.group(1))
+    if weak_topics:
+        parsed["weak_topics"] = [item.strip() for item in weak_topics.group(1).split(",") if item.strip()]
+    if excluded_days:
+        parsed["excluded_days"] = [item.strip() for item in excluded_days.group(1).split(",") if item.strip()]
+    if target_grade:
+        parsed["target_grade"] = target_grade.group(1).strip()
+    return parsed
+
+
+def _parse_planner_prompt_llm(text):
+    prompt_text = str(text or "").strip()
+    if not prompt_text:
+        return {}
+    today = datetime.now(timezone.utc).date().isoformat()
+    prompt = f"""
+Extract exam planning fields from the user's request.
+Return only a JSON object with these keys when known:
+exam_date as YYYY-MM-DD, daily_study_hours as a number, weekly_study_hours as a number,
+preferred_session_length as minutes, weak_topics as an array of strings,
+excluded_days as an array of weekday names or YYYY-MM-DD dates, target_grade as a string,
+target_exam as a short string.
+If the user gives a single hours value without saying weekly, treat it as daily_study_hours.
+Use today's date only to resolve relative dates if needed: {today}.
+User request: {prompt_text}
+"""
+    try:
+        parsed = _extract_json_object(_invoke_text_model(prompt))
+    except Exception:
+        return {}
+    out = {}
+    if _parse_date(parsed.get("exam_date")):
+        out["exam_date"] = parsed.get("exam_date")
+    for key in ("daily_study_hours", "weekly_study_hours"):
+        try:
+            value = float(parsed.get(key))
+            if value > 0:
+                out[key] = value
+        except (TypeError, ValueError):
+            pass
+    if parsed.get("preferred_session_length"):
+        out["preferred_session_length"] = parsed.get("preferred_session_length")
+    for key in ("weak_topics", "excluded_days"):
+        values = parsed.get(key)
+        if isinstance(values, list):
+            out[key] = [str(item).strip() for item in values if str(item).strip()]
+    for key in ("target_grade", "target_exam"):
+        if parsed.get(key):
+            out[key] = str(parsed.get(key)).strip()
+    return out
+
+
+def _normalize_planner_payload(payload):
+    normalized = dict(payload or {})
+    prompt_text = normalized.get("prompt") or normalized.get("question") or normalized.get("message") or ""
+    deterministic = _parse_planner_prompt_deterministic(prompt_text)
+    for key, value in deterministic.items():
+        if normalized.get(key) in (None, "", []):
+            normalized[key] = value
+    if not normalized.get("exam_date") or not (
+        normalized.get("daily_study_hours")
+        or normalized.get("weekly_study_hours")
+        or normalized.get("hours_per_day")
+        or normalized.get("hours_per_week")
+    ):
+        llm_fields = _parse_planner_prompt_llm(prompt_text)
+        for key, value in llm_fields.items():
+            if normalized.get(key) in (None, "", []):
+                normalized[key] = value
+    return normalized
 
 
 def _positive_int(value, default=None, minimum=1, maximum=None):
@@ -310,8 +453,8 @@ def _build_tasks(start_date, exam_date, minutes_per_study_day, preferred_session
     return tasks
 
 
-def handle_planner(event):
-    payload = parse_json_body(event)
+def _write_planner(event, plan_id=None):
+    payload = _normalize_planner_payload(parse_json_body(event))
     user_id = get_user_id(event, payload)
     session_id = get_session_id(event, payload) or "default"
     selected_doc_ids = normalize_doc_ids(payload)
@@ -319,9 +462,9 @@ def handle_planner(event):
     minutes_per_study_day, availability_mode = _availability(payload)
 
     if not exam_date:
-        return response(400, {"message": "exam_date is required in YYYY-MM-DD format"})
+        return response(400, {"message": "Tell me the exam date, or include it as YYYY-MM-DD."})
     if not minutes_per_study_day:
-        return response(400, {"message": "daily_study_hours or weekly_study_hours is required"})
+        return response(400, {"message": "Tell me the daily or weekly study hours."})
     today = datetime.now(timezone.utc).date()
     start_date = min(today, exam_date)
     weak_topics = [str(item).strip() for item in payload.get("weak_topics") or [] if str(item).strip()]
@@ -375,7 +518,7 @@ def handle_planner(event):
     if not tasks:
         return response(400, {"message": "No study days are available before the exam after exclusions"})
 
-    plan_id = f"plan_{uuid.uuid4().hex[:10]}"
+    plan_id = plan_id or f"plan_{uuid.uuid4().hex[:10]}"
     summary = (
         f"Study plan through {exam_date.isoformat()} using {availability_mode} availability. "
         f"{len(tasks)} sessions cover {len(topics)} focus topics across {len(selected_ids)} document(s)."
@@ -412,6 +555,10 @@ def handle_planner(event):
     create_memory_event(user_id, session_id, "ASSISTANT", _format_plan_text(plan), {"feature": "planning", "plan_id": plan_id})
 
     return response(200, _plan_public(item))
+
+
+def handle_planner(event):
+    return _write_planner(event)
 
 
 def handle_planner_list(event):
@@ -472,6 +619,18 @@ def handle_planner_delete(event, plan_id):
     return response(200, {"deleted": True, "plan_id": plan_id})
 
 
+def handle_planner_update(event, plan_id):
+    payload = parse_json_body(event)
+    user_id = get_user_id(event, payload)
+    session_id = get_session_id(event, payload) or "default"
+    item = _get_plan_item(user_id, plan_id)
+    if not item:
+        return response(404, {"message": "Plan not found"})
+    if item.get("session_id", "default") != session_id:
+        return response(403, {"message": "Plan does not belong to the active session"})
+    return _write_planner(event, plan_id=plan_id)
+
+
 def handle_planner_recommend_docs(event, plan_id):
     payload = parse_json_body(event)
     query = event.get("queryStringParameters") or {}
@@ -513,6 +672,8 @@ def route_request(event):
     match = re.match(r"^/planner/([^/]+)$", path)
     if match and method == "GET":
         return handle_planner_detail(event, match.group(1))
+    if match and method in ("PUT", "PATCH"):
+        return handle_planner_update(event, match.group(1))
     if match and method == "DELETE":
         return handle_planner_delete(event, match.group(1))
     recommend_match = re.match(r"^/planner/([^/]+)/recommend-docs$", path)

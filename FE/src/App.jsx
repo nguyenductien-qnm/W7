@@ -268,18 +268,32 @@ function parsePlannerPrompt(prompt) {
   const examDate = text.match(/\b(20\d{2}-\d{2}-\d{2})\b/)?.[1] || "";
   const daily = text.match(/(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h)\s*(?:per\s+day|daily|\/\s*day)/i);
   const weekly = text.match(/(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h)\s*(?:per\s+week|weekly|\/\s*week)/i);
+  const genericHours = text.match(/(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h)\b/i);
   const sessionLength = text.match(/(\d+)\s*(?:minutes?|mins?|m)\s*(?:sessions?|session length)/i);
   const weakTopics = text.match(/weak topics?\s*:\s*([^.;]+)/i)?.[1];
   const excludedDays = text.match(/(?:exclude|excluded days?)\s*:\s*([^.;]+)/i)?.[1];
   const targetGrade = text.match(/(?:target grade|goal)\s*:\s*([^.;]+)/i)?.[1]?.trim();
   return {
     exam_date: examDate,
-    daily_study_hours: daily ? Number(daily[1]) : undefined,
+    daily_study_hours: daily ? Number(daily[1]) : !weekly && genericHours ? Number(genericHours[1]) : undefined,
     weekly_study_hours: weekly ? Number(weekly[1]) : undefined,
     preferred_session_length: sessionLength ? Number(sessionLength[1]) : undefined,
     weak_topics: weakTopics ? weakTopics.split(",").map((item) => item.trim()).filter(Boolean) : undefined,
     excluded_days: excludedDays ? excludedDays.split(",").map((item) => item.trim()).filter(Boolean) : undefined,
     target_grade: targetGrade,
+  };
+}
+
+function blankPlanForm() {
+  return {
+    prompt: "",
+    exam_date: "",
+    daily_study_hours: "",
+    weekly_study_hours: "",
+    preferred_session_length: "60",
+    weak_topics: "",
+    excluded_days: "",
+    target_grade: "",
   };
 }
 
@@ -378,6 +392,8 @@ export default function App() {
   const [docs, setDocs] = useState([]);
   const [plans, setPlans] = useState([]);
   const [activePlan, setActivePlan] = useState(null);
+  const [planForm, setPlanForm] = useState(() => blankPlanForm());
+  const [editingPlanId, setEditingPlanId] = useState("");
   const [selectedDocIds, setSelectedDocIds] = useState(() =>
     loadJson(storageKey(currentUserId, "selected-docs"), [])
   );
@@ -657,6 +673,81 @@ export default function App() {
     }
   }
 
+  function planFormPayload() {
+    const parsedPrompt = parsePlannerPrompt(planForm.prompt);
+    const weakTopics = String(planForm.weak_topics || "")
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+    const excludedDays = String(planForm.excluded_days || "")
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+    const readyDocIds = new Set(readyDocs.map((doc) => doc.doc_id));
+    const plannerDocIds = selectedDocIds.filter((docId) => readyDocIds.has(docId));
+    return {
+      prompt: planForm.prompt || undefined,
+      question: planForm.prompt || undefined,
+      exam_date: planForm.exam_date || parsedPrompt.exam_date || undefined,
+      daily_study_hours: planForm.daily_study_hours
+        ? Number(planForm.daily_study_hours)
+        : parsedPrompt.daily_study_hours,
+      weekly_study_hours: planForm.weekly_study_hours
+        ? Number(planForm.weekly_study_hours)
+        : parsedPrompt.weekly_study_hours,
+      preferred_session_length: planForm.preferred_session_length
+        ? Number(planForm.preferred_session_length)
+        : parsedPrompt.preferred_session_length,
+      weak_topics: weakTopics.length ? weakTopics : parsedPrompt.weak_topics,
+      excluded_days: excludedDays.length ? excludedDays : parsedPrompt.excluded_days,
+      target_grade: planForm.target_grade || parsedPrompt.target_grade || undefined,
+      user_id: currentUserId,
+      session_id: activeSessionId,
+      ...(plannerDocIds.length ? { doc_id: plannerDocIds[0], selected_doc_ids: plannerDocIds } : {}),
+    };
+  }
+
+  async function savePlanFromPanel(event) {
+    event?.preventDefault();
+    setBusyFlag("plans", true);
+    try {
+      const payload = planFormPayload();
+      const endpoint = editingPlanId
+        ? `/planner/${encodeURIComponent(editingPlanId)}?session_id=${encodeURIComponent(activeSessionId)}`
+        : "/planner";
+      const body = await call(endpoint, {
+        method: editingPlanId ? "PUT" : "POST",
+        json: payload,
+      });
+      setActivePlan(body);
+      setEditingPlanId("");
+      setPlanForm(blankPlanForm());
+      await refreshPlans(activeSessionId);
+      showToast(editingPlanId ? "Plan updated." : "Plan created.");
+    } catch (err) {
+      showToast(err.message);
+    } finally {
+      setBusyFlag("plans", false);
+    }
+  }
+
+  function editPlan(plan) {
+    if (!plan) return;
+    setEditingPlanId(plan.plan_id || "");
+    setPlannerOpen(true);
+    setPlanForm({
+      ...blankPlanForm(),
+      prompt: plan.summary || "",
+      exam_date: plan.exam_date || "",
+      weak_topics: safeArray(plan.weak_topics).join(", "),
+    });
+  }
+
+  function cancelPlanEdit() {
+    setEditingPlanId("");
+    setPlanForm(blankPlanForm());
+  }
+
   function applyPlanDocIds(docIds, label = "Plan documents selected.") {
     const readyDocIds = new Set(readyDocs.map((doc) => doc.doc_id));
     const nextIds = safeArray(docIds)
@@ -706,6 +797,7 @@ export default function App() {
       });
       setPlans((prev) => prev.filter((plan) => plan.plan_id !== planId));
       setActivePlan((prev) => (prev?.plan_id === planId ? null : prev));
+      if (editingPlanId === planId) cancelPlanEdit();
       showToast("Plan deleted.");
     } catch (err) {
       showToast(err.message);
@@ -1025,16 +1117,13 @@ export default function App() {
           loading: false,
         });
       } else {
-        const plannerInput = parsePlannerPrompt(prompt);
-        if (!plannerInput.exam_date || (!plannerInput.daily_study_hours && !plannerInput.weekly_study_hours)) {
-          throw new Error("Include an exam date as YYYY-MM-DD and daily or weekly study hours.");
-        }
         const readyDocIds = new Set(readyDocs.map((doc) => doc.doc_id));
         const plannerDocIds = scopedDocIds.filter((docId) => readyDocIds.has(docId));
         const body = await call("/planner", {
           method: "POST",
           json: {
-            ...plannerInput,
+            prompt,
+            question: prompt,
             user_id: currentUserId,
             session_id: activeSessionId,
             ...(plannerDocIds.length
@@ -1226,6 +1315,67 @@ export default function App() {
                   Refresh
                 </button>
               </div>
+              <form className="plan-editor" onSubmit={savePlanFromPanel}>
+                <div className="plan-editor-head">
+                  <strong>{editingPlanId ? "Edit Plan" : "Manual Plan"}</strong>
+                  {editingPlanId ? (
+                    <button className="link-btn" type="button" onClick={cancelPlanEdit}>
+                      Cancel
+                    </button>
+                  ) : null}
+                </div>
+                <textarea
+                  value={planForm.prompt}
+                  onChange={(event) => setPlanForm((prev) => ({ ...prev, prompt: event.target.value }))}
+                  placeholder="Natural language plan request..."
+                  rows={2}
+                />
+                <div className="plan-editor-grid">
+                  <input
+                    value={planForm.exam_date}
+                    onChange={(event) => setPlanForm((prev) => ({ ...prev, exam_date: event.target.value }))}
+                    placeholder="YYYY-MM-DD"
+                  />
+                  <input
+                    value={planForm.daily_study_hours}
+                    onChange={(event) => setPlanForm((prev) => ({ ...prev, daily_study_hours: event.target.value }))}
+                    placeholder="Daily hrs"
+                    inputMode="decimal"
+                  />
+                  <input
+                    value={planForm.weekly_study_hours}
+                    onChange={(event) => setPlanForm((prev) => ({ ...prev, weekly_study_hours: event.target.value }))}
+                    placeholder="Weekly hrs"
+                    inputMode="decimal"
+                  />
+                  <input
+                    value={planForm.preferred_session_length}
+                    onChange={(event) => setPlanForm((prev) => ({ ...prev, preferred_session_length: event.target.value }))}
+                    placeholder="Min/session"
+                    inputMode="numeric"
+                  />
+                </div>
+                <input
+                  value={planForm.weak_topics}
+                  onChange={(event) => setPlanForm((prev) => ({ ...prev, weak_topics: event.target.value }))}
+                  placeholder="Weak topics, comma separated"
+                />
+                <div className="plan-editor-grid">
+                  <input
+                    value={planForm.excluded_days}
+                    onChange={(event) => setPlanForm((prev) => ({ ...prev, excluded_days: event.target.value }))}
+                    placeholder="Excluded days"
+                  />
+                  <input
+                    value={planForm.target_grade}
+                    onChange={(event) => setPlanForm((prev) => ({ ...prev, target_grade: event.target.value }))}
+                    placeholder="Target"
+                  />
+                </div>
+                <button className="soft-btn primary" type="submit" disabled={busy.plans || !readyDocs.length}>
+                  {editingPlanId ? "Update Plan" : "Create Plan"}
+                </button>
+              </form>
               {plans.length ? (
                 plans.map((plan) => (
                   <button
@@ -1268,6 +1418,9 @@ export default function App() {
                         disabled={busy.plans}
                       >
                         Find Docs
+                      </button>
+                      <button className="soft-btn" onClick={() => editPlan(activePlan)}>
+                        Edit
                       </button>
                       <button className="soft-btn danger" onClick={() => deletePlan(activePlan.plan_id)}>
                         Delete

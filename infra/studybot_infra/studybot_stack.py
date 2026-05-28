@@ -332,7 +332,12 @@ class StudyBotInfraStack(Stack):
         )
         http_api.add_routes(
             path="/planner/{plan_id}",
-            methods=[apigatewayv2.HttpMethod.GET, apigatewayv2.HttpMethod.DELETE],
+            methods=[
+                apigatewayv2.HttpMethod.GET,
+                apigatewayv2.HttpMethod.PUT,
+                apigatewayv2.HttpMethod.PATCH,
+                apigatewayv2.HttpMethod.DELETE,
+            ],
             integration=planner_integration,
         )
         http_api.add_routes(

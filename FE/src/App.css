@@ -66,7 +66,8 @@ body {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
@@ -100,7 +101,8 @@ button:disabled {
 }
 
 input,
-select {
+select,
+textarea {
   width: 100%;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
@@ -114,9 +116,17 @@ select {
 }
 
 input:focus,
-select:focus {
+select:focus,
+textarea:focus {
   border-color: var(--primary);
   box-shadow: 0 0 0 3px var(--primary-soft);
+}
+
+textarea {
+  resize: vertical;
+  min-height: 54px;
+  padding: 8px 10px;
+  outline: 0;
 }
 
 .app-shell {
@@ -345,6 +355,12 @@ select:focus {
   border-color: var(--primary);
   background: var(--primary-soft);
   color: var(--primary-strong);
+}
+
+.soft-btn.primary {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: #fff;
 }
 
 .chat-area {
@@ -805,6 +821,40 @@ select:focus {
   margin: 3px 0 0;
   color: var(--muted);
   font-size: 13px;
+}
+
+.plan-editor {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--canvas);
+  margin-bottom: 10px;
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.plan-editor-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.plan-editor-head strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.plan-editor input,
+.plan-editor textarea {
+  padding: 7px 9px;
+  font-size: 13px;
+}
+
+.plan-editor-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
 }
 
 .plan-row {
