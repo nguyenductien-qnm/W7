@@ -50,6 +50,15 @@ def _extract_doc_id_from_uri(source_uri):
     return ""
 
 
+def _doc_id_filter(allowed_doc_ids):
+    doc_ids = [str(doc_id).strip() for doc_id in (allowed_doc_ids or []) if str(doc_id).strip()]
+    if not doc_ids:
+        return None
+    if len(doc_ids) == 1:
+        return {"equals": {"key": "doc_id", "value": doc_ids[0]}}
+    return {"orAll": [{"equals": {"key": "doc_id", "value": doc_id}} for doc_id in doc_ids]}
+
+
 def _result_matches_doc_ids(result, allowed_doc_ids):
     if not allowed_doc_ids:
         return True
@@ -152,11 +161,11 @@ def _normalize_question(item, source_doc_id="", source_title=""):
         "answer": answer,
         "explanation": explanation,
     }
-    if source_doc_id and not item.get("source_doc_id"):
+    if source_doc_id:
         question_item["source_doc_id"] = source_doc_id
     elif item.get("source_doc_id"):
         question_item["source_doc_id"] = str(item.get("source_doc_id"))
-    if source_title and not item.get("source_title"):
+    if source_title:
         question_item["source_title"] = source_title
     elif item.get("source_title"):
         question_item["source_title"] = str(item.get("source_title"))
@@ -187,19 +196,37 @@ def _build_mcq(concept, idx, source_doc_id="", source_title=""):
     return question
 
 
+VALID_DIFFICULTIES = {"easy", "medium", "hard"}
+
+
+def _normalize_difficulty(value):
+    difficulty = str(value or "medium").strip().lower()
+    return difficulty if difficulty in VALID_DIFFICULTIES else "medium"
+
+
+def _difficulty_guidance(difficulty):
+    difficulty = _normalize_difficulty(difficulty)
+    if difficulty == "easy":
+        return "Use direct recall questions with clear wording and obvious distractors."
+    if difficulty == "hard":
+        return "Use harder application and reasoning questions with plausible distractors; avoid trivia-only questions."
+    return "Use moderate conceptual questions with plausible but fair distractors."
+
+
 def _normalize_count(value):
     try:
-        return max(5, min(10, int(value or 5)))
+        return max(1, min(20, int(value or 5)))
     except (TypeError, ValueError):
         return 5
 
 
-def generate_fallback_quiz(concepts, count=5, source_doc_id="", source_title=""):
+def generate_fallback_quiz(concepts, count=5, source_doc_id="", source_title="", difficulty="medium"):
     count = _normalize_count(count)
     source = [str(concept).strip() for concept in (concepts or []) if str(concept).strip()]
     source = source or ["Core idea", "Trade-offs", "Architecture", "Reliability", "Performance"]
     questions = []
-    for idx, concept in enumerate(source):
+    for idx in range(count):
+        concept = source[idx % len(source)]
         questions.append(_build_mcq(concept, idx, source_doc_id, source_title))
         if len(questions) >= count:
             break
@@ -212,16 +239,22 @@ def generate_quiz_from_kb(
     fallback_concepts,
     count=5,
     source_title="",
+    difficulty="medium",
 ):
     count = _normalize_count(count)
+    difficulty = _normalize_difficulty(difficulty)
     try:
+        vector_search = {
+            "numberOfResults": QUIZ_RETRIEVAL_RESULTS,
+        }
+        metadata_filter = _doc_id_filter(selected_doc_ids)
+        if metadata_filter:
+            vector_search["filter"] = metadata_filter
         response_data = BEDROCK_AGENT_RUNTIME.retrieve(
             knowledgeBaseId=knowledge_base_id,
             retrievalQuery={"text": "Identify key testable concepts from selected documents."},
             retrievalConfiguration={
-                "vectorSearchConfiguration": {
-                    "numberOfResults": QUIZ_RETRIEVAL_RESULTS,
-                }
+                "vectorSearchConfiguration": vector_search,
             },
         )
     except Exception:
@@ -236,6 +269,7 @@ def generate_quiz_from_kb(
     prompt = (
         "Generate multiple-choice quiz questions using only the grounded context. "
         f"Return strict JSON as an array of {count} objects. "
+        f"Difficulty: {difficulty}. {_difficulty_guidance(difficulty)} "
         "Each object must have question, options, answer, and explanation. "
         "Include source_doc_id and source_title when known. "
         "options must have exactly 4 strings. answer must be A, B, C, or D. "

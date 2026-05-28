@@ -446,7 +446,8 @@ def extract_with_textract(bucket, key):
 
 def delete_processed_objects(bucket, user_id, session_id, doc_id):
     processed_root = KB_PROCESSED_PREFIX.rstrip("/")
-    keys = [f"{processed_root}/{user_id}/{session_id}/{doc_id}.txt"]
+    processed_key = f"{processed_root}/{user_id}/{session_id}/{doc_id}.txt"
+    keys = [processed_key, f"{processed_key}.metadata.json"]
     chunk_prefixes = [f"{processed_root}/{user_id}/{session_id}/{doc_id}/"]
 
     for chunk_prefix in chunk_prefixes:
@@ -467,11 +468,22 @@ def delete_processed_objects(bucket, user_id, session_id, doc_id):
             s3.delete_objects(Bucket=bucket, Delete={"Objects": [{"Key": key} for key in batch], "Quiet": True})
 
 
-def upload_processed_text(bucket, user_id, session_id, doc_id, text):
+def _metadata_attribute(value, *, include_for_embedding=False):
+    return {
+        "value": {
+            "type": "STRING",
+            "stringValue": str(value or ""),
+        },
+        "includeForEmbedding": include_for_embedding,
+    }
+
+
+def upload_processed_text(bucket, user_id, session_id, doc_id, text, title):
     processed_root = KB_PROCESSED_PREFIX.rstrip("/")
     safe_session_id = session_id or "default"
     processed_prefix = f"{processed_root}/{user_id}/{safe_session_id}/"
     processed_key = f"{processed_prefix}{doc_id}.txt"
+    metadata_key = f"{processed_key}.metadata.json"
     delete_processed_objects(bucket, user_id, safe_session_id, doc_id)
 
     s3.put_object(
@@ -480,9 +492,24 @@ def upload_processed_text(bucket, user_id, session_id, doc_id, text):
         Body=text.encode("utf-8"),
         ContentType="text/plain; charset=utf-8",
     )
+    metadata_body = {
+        "metadataAttributes": {
+            "doc_id": _metadata_attribute(doc_id),
+            "user_id": _metadata_attribute(user_id),
+            "session_id": _metadata_attribute(safe_session_id),
+            "title": _metadata_attribute(title, include_for_embedding=True),
+        }
+    }
+    s3.put_object(
+        Bucket=bucket,
+        Key=metadata_key,
+        Body=json.dumps(metadata_body, ensure_ascii=False).encode("utf-8"),
+        ContentType="application/json; charset=utf-8",
+    )
 
     return {
         "key": processed_key,
+        "metadata_key": metadata_key,
         "prefix": processed_prefix,
         "size_bytes": len(text.encode("utf-8")),
     }
@@ -519,6 +546,24 @@ def latest_active_ingestion_job():
     if jobs:
         return sorted(jobs, key=job_timestamp, reverse=True)[0]
     return {}
+
+
+def wait_for_ingestion_job(job_id, max_wait_seconds=90):
+    if not job_id:
+        return {}
+    deadline = time.time() + max_wait_seconds
+    latest = {}
+    while time.time() < deadline:
+        response_data = bedrock_agent.get_ingestion_job(
+            knowledgeBaseId=BEDROCK_KNOWLEDGE_BASE_ID,
+            dataSourceId=BEDROCK_DATA_SOURCE_ID,
+            ingestionJobId=job_id,
+        )
+        latest = response_data.get("ingestionJob", {})
+        if str(latest.get("status", "")).upper() not in {"STARTING", "IN_PROGRESS"}:
+            return latest
+        time.sleep(5)
+    return latest
 
 
 def is_ingestion_already_running_error(exc):
@@ -586,7 +631,7 @@ def process_record(record):
         update_doc(user_id, doc_id, kb_status="FAILED", failure_reason=reason, processed_at=now_iso())
         return {"doc_id": doc_id, "status": "FAILED", "reason": reason, "file_type": extraction.get("file_type", extension or "unknown")}
 
-    processed_upload = upload_processed_text(bucket, user_id, session_id, doc_id, text)
+    processed_upload = upload_processed_text(bucket, user_id, session_id, doc_id, text, filename)
     processed_key = processed_upload["key"]
     processed_attrs = {
         "extraction_mode": extraction_mode,
@@ -599,6 +644,7 @@ def process_record(record):
         "raw_s3_key": key,
         "processed_s3_key": processed_key,
         "processed_text_s3_key": processed_key,
+        "processed_metadata_s3_key": processed_upload["metadata_key"],
         "processed_at": now_iso(),
     }
 
@@ -612,15 +658,26 @@ def process_record(record):
                 ingestion_job = latest_active_ingestion_job()
             except Exception:
                 ingestion_job = {}
-            ingestion_job_id = ingestion_job.get("ingestionJobId", "")
-            ingestion_status = ingestion_job.get("status", "IN_PROGRESS")
+            active_job_id = ingestion_job.get("ingestionJobId", "")
+            active_status = ingestion_job.get("status", "IN_PROGRESS")
+            try:
+                completed_job = wait_for_ingestion_job(active_job_id)
+                if str(completed_job.get("status", "")).upper() not in {"STARTING", "IN_PROGRESS"}:
+                    ingestion_job = start_kb_ingestion()
+            except Exception:
+                ingestion_job = {
+                    "ingestionJobId": active_job_id,
+                    "status": active_status,
+                }
+            ingestion_job_id = ingestion_job.get("ingestionJobId", active_job_id)
+            ingestion_status = ingestion_job.get("status", active_status)
             update_doc(
                 user_id,
                 doc_id,
                 kb_status="PROCESSING",
                 ingestion_job_id=ingestion_job_id,
                 ingestion_status=ingestion_status,
-                ingestion_note="Attached to active KB ingestion job after concurrent start was rejected.",
+                ingestion_note="Started or attached to follow-up KB ingestion after concurrent start was rejected.",
                 **processed_attrs,
             )
             return {
@@ -628,6 +685,7 @@ def process_record(record):
                 "status": "PROCESSING",
                 "reason": "ingestion_already_running",
                 "processed_text_s3_key": processed_key,
+                "processed_metadata_s3_key": processed_upload["metadata_key"],
                 "ingestion_job_id": ingestion_job_id,
                 "ingestion_status": ingestion_status,
             }
@@ -644,6 +702,7 @@ def process_record(record):
             "status": "FAILED",
             "reason": "ingestion_start_failed",
             "processed_text_s3_key": processed_key,
+            "processed_metadata_s3_key": processed_upload["metadata_key"],
             "error": str(exc),
         }
 
@@ -662,6 +721,7 @@ def process_record(record):
         "extraction_mode": extraction_mode,
         "file_type": extraction.get("file_type", extension.lstrip(".")),
         "processed_text_s3_key": processed_key,
+        "processed_metadata_s3_key": processed_upload["metadata_key"],
         "ingestion_job_id": ingestion_job.get("ingestionJobId", ""),
         "ingestion_status": ingestion_job.get("status", "STARTING"),
     }

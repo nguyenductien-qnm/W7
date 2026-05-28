@@ -4,12 +4,12 @@
     "AgentCoreGatewayUrl": "https://studybot-tools-jvjik80lgi.gateway.bedrock-agentcore.ap-southeast-1.amazonaws.com/mcp",
     "ProcessPdfLambdaName": "StudyBotInfraStack-ProcessPdfLambda9E4AD41C-rSjb6gPAwkZE",
     "SummaryLambdaName": "StudyBotInfraStack-StudyBotSummaryLambda9747F23E-i9OCNShYC52T",
-    "VectorIndexArn": "arn:aws:s3vectors:ap-southeast-1:589077667575:bucket/studybot-vectors-589077667575-ap-southeast-1/index/studybot-kb-index",
-    "KnowledgeBaseId": "LI32IWLOB5",
+    "VectorIndexArn": "arn:aws:s3vectors:ap-southeast-1:589077667575:bucket/studybotinfrastack-studybotknowledgebasevectorbuck-t9bgmpd2yqk1/index/studybot-kb-index-v2",
+    "KnowledgeBaseId": "AXVC1I6AQN",
     "IngestionFailureMetricName": "StudyBot/W7/IngestionFailures",
     "HistoryLambdaName": "StudyBotInfraStack-StudyBotHistoryLambdaA392710D-uLYmqJWC7WqP",
     "HttpApiUrl": "https://3sgavxe4c0.execute-api.ap-southeast-1.amazonaws.com",
-    "DocumentsTableName": "StudyBotDocuments",
+    "DocumentsTableName": "StudyBotInfraStack-StudyBotDocuments5485FA25-OOQB8FWTKUX8",
     "DocumentsLambdaName": "StudyBotInfraStack-StudyBotDocumentsLambda446BD67A-usjOkvIHE0aE",
     "LoginLambdaName": "StudyBotInfraStack-StudyBotLoginLambda7CCA4A44-1cOPmvFXjpoo",
     "UploadLambdaName": "StudyBotInfraStack-StudyBotUploadLambda601DAEF7-G6VRjQ87JgH2",
@@ -21,9 +21,9 @@
     "VpcId": "vpc-06d2de3b6e14576ca",
     "FrontendBucketName": "studybotinfrastack-studybotfrontendbucket0d64d827-ve7senepf9rg",
     "AgentCoreGatewayId": "studybot-tools-jvjik80lgi",
-    "UploadsBucketName": "studybotdatastack-uploadbucketd2c1da78-2cpeowy02vjk",
+    "UploadsBucketName": "studybotinfrastack-studybotuploadsa01cf717-yffnnbch9sde",
     "QaLambdaName": "StudyBotInfraStack-StudyBotQaLambda00A30CC0-9vNZtze8ttev",
-    "DataSourceId": "V0ISBKEMXT",
+    "DataSourceId": "2Q8XWMU3ER",
     "FrontendCloudFrontDomain": "d202pyjoa7b4uh.cloudfront.net"
   }
 }

@@ -59,6 +59,12 @@ def apply_lambda_permissions(
             resources=[f"{storage.uploads_bucket.bucket_arn}/processed/*"],
         )
     )
+    lambdas.qa_lambda.add_to_role_policy(
+        iam.PolicyStatement(
+            actions=["s3:GetObject"],
+            resources=[f"{storage.uploads_bucket.bucket_arn}/processed/*"],
+        )
+    )
     lambdas.process_pdf_lambda.add_to_role_policy(
         iam.PolicyStatement(
             actions=["s3:GetObject"],

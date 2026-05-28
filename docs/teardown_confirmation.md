@@ -19,16 +19,14 @@ Use this after grading is complete.
 - [ ] CloudWatch dashboard `StudyBot-W7-Operations` and W7 alarms removed.
 - [ ] VPC, private subnets, security groups, and VPC endpoints removed.
 
-## Shared / Imported Resources
+## Data / AI Resources
 
-These are imported by CDK and may be shared. Delete only if the project is fully retired.
-
-- [ ] DynamoDB table `StudyBotDocuments`.
-- [ ] Upload bucket `studybotdatastack-uploadbucketd2c1da78-2cpeowy02vjk`.
-- [ ] Bedrock Knowledge Base `LI32IWLOB5`.
-- [ ] Bedrock data source `V0ISBKEMXT`.
-- [ ] S3 Vectors index `studybot-kb-index`.
-- [ ] Bedrock Knowledge Base role `StudyBotBedrockStack-KnowledgeBaseRoleA2B317B9-UycR9VjqexH0`.
+- [ ] DynamoDB table `StudyBotInfraStack-StudyBotDocuments5485FA25-OOQB8FWTKUX8`.
+- [ ] Upload bucket `studybotinfrastack-studybotuploadsa01cf717-yffnnbch9sde`.
+- [ ] Bedrock Knowledge Base `AXVC1I6AQN`.
+- [ ] Bedrock data source `2Q8XWMU3ER`.
+- [ ] S3 Vectors index `studybot-kb-index-v2`.
+- [ ] S3 Vectors bucket `studybotinfrastack-studybotknowledgebasevectorbuck-t9bgmpd2yqk1`.
 
 ## Evidence
 

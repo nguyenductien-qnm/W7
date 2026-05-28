@@ -106,6 +106,8 @@ function renderInlineMarkdown(text, keyPrefix, citations = [], messageId = "", o
               <button
                 key={`${keyPrefix}-cite-btn-${number}`}
                 type="button"
+                title={`Open Source ${number}`}
+                aria-label={`Open Source ${number}`}
                 onClick={() => onOpenCitation?.(messageId, number - 1)}
               >
                 [{number}]
@@ -1231,8 +1233,6 @@ export default function App() {
             selected_doc_ids: scopedDocIds,
             feature: "quiz",
             question: prompt,
-            difficulty: "medium",
-            count: 5,
           },
         });
         const questions = safeArray(body.questions);
@@ -1251,8 +1251,6 @@ export default function App() {
             selected_doc_ids: scopedDocIds,
             feature: "flashcards",
             question: prompt,
-            difficulty: "easy",
-            count: 6,
           },
         });
         const cards = safeArray(body.questions).map((q) => ({

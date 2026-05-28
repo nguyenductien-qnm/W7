@@ -1,6 +1,7 @@
 from core import (
     BEDROCK_KNOWLEDGE_BASE_ID,
     TABLE,
+    UPLOADS_BUCKET_NAME,
     get_selected_docs_for_session,
     get_session_id,
     get_user_id,
@@ -11,9 +12,53 @@ from core import (
     response,
     sk_question,
 )
-from .qa_kb import ask_knowledge_base
-from memory_utils import create_memory_event, retrieve_memory_texts
+import boto3
+from botocore.exceptions import ClientError
+
+from .qa_kb import answer_from_processed_texts, ask_knowledge_base
+from memory_utils import create_memory_event
 from tool_contract import run_tool_handler
+
+
+S3 = boto3.client("s3")
+
+
+def _processed_key_candidates(doc):
+    keys = []
+    doc_id = str(doc.get("doc_id") or "").strip()
+    for field in ("processed_text_s3_key", "processed_s3_key", "processed_s3_prefix"):
+        value = str(doc.get(field) or "").strip()
+        if not value:
+            continue
+        if value.endswith(".txt") and value not in keys:
+            keys.append(value)
+            continue
+        if value.endswith("/") and doc_id:
+            composed = f"{value}{doc_id}.txt"
+            if composed not in keys:
+                keys.append(composed)
+    user_id = str(doc.get("PK") or "").replace("USER#", "")
+    session_id = str(doc.get("session_id") or "default")
+    for key in (f"processed/{user_id}/{session_id}/{doc_id}.txt",):
+        if user_id and doc_id and key not in keys:
+            keys.append(key)
+    return keys
+
+
+def _read_processed_text(doc):
+    if not UPLOADS_BUCKET_NAME:
+        return "", ""
+    for key in _processed_key_candidates(doc):
+        try:
+            obj = S3.get_object(Bucket=UPLOADS_BUCKET_NAME, Key=key)
+            text = obj["Body"].read().decode("utf-8", errors="replace").strip()
+            if text:
+                return text, f"s3://{UPLOADS_BUCKET_NAME}/{key}"
+        except ClientError:
+            continue
+        except Exception:
+            continue
+    return "", ""
 
 
 def handle_ask(event):
@@ -42,12 +87,8 @@ def handle_ask(event):
     citations = []
 
     if BEDROCK_KNOWLEDGE_BASE_ID:
-        memory_texts = retrieve_memory_texts(user_id, session_id, question, top_k=3)
-        kb_question = question
-        if memory_texts:
-            kb_question = "Relevant memory:\n" + "\n".join(memory_texts) + f"\n\nQuestion: {question}"
         kb_result = ask_knowledge_base(
-            question=kb_question,
+            question=question,
             knowledge_base_id=BEDROCK_KNOWLEDGE_BASE_ID,
             doc_title=primary_doc.get("title", "uploaded.pdf"),
             allowed_doc_ids=[item.get("doc_id") for item in selected_docs if item.get("doc_id")],
@@ -60,6 +101,26 @@ def handle_ask(event):
         answer = kb_result.get("answer") or answer
         citations = kb_result.get("citations") or citations
         topic = kb_result.get("topic") or topic
+
+    if not citations:
+        processed_texts = []
+        for doc in selected_docs:
+            text, source_uri = _read_processed_text(doc)
+            if text:
+                processed_texts.append(
+                    {
+                        "doc_id": doc.get("doc_id"),
+                        "title": doc.get("title", "uploaded.pdf"),
+                        "source_uri": source_uri,
+                        "text": text,
+                    }
+                )
+        if processed_texts:
+            s3_result = answer_from_processed_texts(question, processed_texts, primary_doc.get("title", "uploaded.pdf"))
+            if s3_result.get("answer"):
+                answer = s3_result["answer"]
+                citations = s3_result.get("citations") or citations
+                topic = s3_result.get("topic") or topic
 
     TABLE.put_item(
         Item={

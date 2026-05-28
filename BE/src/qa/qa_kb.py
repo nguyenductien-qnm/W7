@@ -52,6 +52,55 @@ def _extract_source_uri(result):
     return ""
 
 
+def _doc_id_filter(allowed_doc_ids):
+    doc_ids = [str(doc_id).strip() for doc_id in (allowed_doc_ids or []) if str(doc_id).strip()]
+    if not doc_ids:
+        return None
+    if len(doc_ids) == 1:
+        return {"equals": {"key": "doc_id", "value": doc_ids[0]}}
+    return {"orAll": [{"equals": {"key": "doc_id", "value": doc_id}} for doc_id in doc_ids]}
+
+
+def _retrieve_with_filter(knowledge_base_id, retrieval_query, metadata_filter, number_of_results):
+    vector_search = {
+        "numberOfResults": number_of_results,
+    }
+    if metadata_filter:
+        vector_search["filter"] = metadata_filter
+    response_data = BEDROCK_AGENT_RUNTIME.retrieve(
+        knowledgeBaseId=knowledge_base_id,
+        retrievalQuery={"text": retrieval_query},
+        retrievalConfiguration={
+            "vectorSearchConfiguration": vector_search,
+        },
+    )
+    return response_data.get("retrievalResults", []) or []
+
+
+def _retrieve_selected_documents(knowledge_base_id, retrieval_query, allowed_doc_ids):
+    doc_ids = [str(doc_id).strip() for doc_id in (allowed_doc_ids or []) if str(doc_id).strip()]
+    if len(doc_ids) <= 1:
+        return _retrieve_with_filter(
+            knowledge_base_id,
+            retrieval_query,
+            _doc_id_filter(doc_ids),
+            QA_RETRIEVAL_RESULTS,
+        )
+
+    per_doc_results = []
+    per_doc_limit = max(3, min(6, QA_RETRIEVAL_RESULTS // max(1, len(doc_ids))))
+    for doc_id in doc_ids:
+        per_doc_results.extend(
+            _retrieve_with_filter(
+                knowledge_base_id,
+                retrieval_query,
+                _doc_id_filter([doc_id]),
+                per_doc_limit,
+            )
+        )
+    return sorted(per_doc_results, key=lambda item: float(item.get("score") or 0), reverse=True)
+
+
 def _extract_document_name(source_uri, fallback, doc_titles_by_id=None):
     doc_titles_by_id = doc_titles_by_id or {}
     extracted_doc_id = _extract_doc_id_from_uri(source_uri)
@@ -126,10 +175,10 @@ def _fallback_answer(question, doc_title):
     )
 
 
-def _context_from_results(results, limit=8, chars_per_chunk=900):
-    snippets = []
+def _unique_results(results, limit=4):
+    unique = []
     seen = set()
-    for idx, result in enumerate(results, start=1):
+    for result in results:
         text = _clean_text((result.get("content") or {}).get("text"))
         if len(text) < 40:
             continue
@@ -137,10 +186,29 @@ def _context_from_results(results, limit=8, chars_per_chunk=900):
         if key in seen:
             continue
         seen.add(key)
-        snippets.append(f"[{idx}] {text[:chars_per_chunk]}")
-        if len(snippets) >= limit:
+        unique.append(result)
+        if len(unique) >= limit:
             break
+    return unique
+
+
+def _context_from_results(results, chars_per_chunk=900):
+    snippets = []
+    for idx, result in enumerate(results, start=1):
+        text = _clean_text((result.get("content") or {}).get("text"))
+        if len(text) < 40:
+            continue
+        source_uri = _extract_source_uri(result)
+        document = _extract_document_name(source_uri, "Document")
+        snippets.append(f"[{idx}] Source {idx}: {document}\n{text[:chars_per_chunk]}")
     return "\n\n".join(snippets)
+
+
+def _chunk_text(text, max_chars=7500):
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return []
+    return [cleaned[index:index + max_chars] for index in range(0, len(cleaned), max_chars)]
 
 
 def _extract_model_text(payload):
@@ -179,19 +247,16 @@ def ask_knowledge_base(
     doc_title,
     allowed_doc_ids=None,
     doc_titles_by_id=None,
+    doc_hints=None,
 ):
     allowed_doc_ids = allowed_doc_ids or []
     doc_titles_by_id = doc_titles_by_id or {}
 
     try:
-        response_data = BEDROCK_AGENT_RUNTIME.retrieve(
-            knowledgeBaseId=knowledge_base_id,
-            retrievalQuery={"text": question},
-            retrievalConfiguration={
-                "vectorSearchConfiguration": {
-                    "numberOfResults": QA_RETRIEVAL_RESULTS,
-                }
-            },
+        results = _retrieve_selected_documents(
+            knowledge_base_id,
+            question,
+            allowed_doc_ids,
         )
     except Exception:
         return {
@@ -200,10 +265,10 @@ def ask_knowledge_base(
             "topic": "General",
         }
 
-    results = response_data.get("retrievalResults", []) or []
     results = [item for item in results if _result_matches_doc_ids(item, allowed_doc_ids)]
-    citations = [_to_citation(result, doc_title, doc_titles_by_id) for result in results[:4]]
-    context = _context_from_results(results)
+    cited_results = _unique_results(results, limit=4)
+    citations = [_to_citation(result, doc_title, doc_titles_by_id) for result in cited_results]
+    context = _context_from_results(cited_results)
 
     if not context:
         return {
@@ -214,8 +279,10 @@ def ask_knowledge_base(
 
     prompt = (
         "Answer the student's question using only the grounded context below. "
-        "If the context is insufficient, say that there is not enough grounded context. "
-        "Be concise, specific, and cite chunk numbers in brackets when useful.\n\n"
+        "The selected documents may include unrelated context; use the relevant context and ignore unrelated chunks. "
+        "If no selected-document context is relevant, say that there is not enough grounded context. "
+        "Use bracket citations like [1] or [2] only when they refer to the matching Source number below. "
+        "Do not cite source numbers that are not listed below.\n\n"
         f"Question: {question}\n\n"
         f"Grounded context:\n{context}\n\n"
         "Answer:"
@@ -229,4 +296,57 @@ def ask_knowledge_base(
         "answer": answer or _fallback_answer(question, doc_title),
         "citations": citations,
         "topic": citations[0].get("document") if citations else "General",
+    }
+
+
+def answer_from_processed_texts(question, doc_texts, fallback_doc_title):
+    context_blocks = []
+    citations = []
+    citation_index = 1
+    for doc in doc_texts:
+        title = doc.get("title") or doc.get("doc_id") or fallback_doc_title or "Document"
+        text = doc.get("text") or ""
+        for chunk in _chunk_text(text)[:4]:
+            cleaned = _clean_text(chunk)
+            if len(cleaned) < 40:
+                continue
+            context_blocks.append(f"[{citation_index}] Document: {title}\n{cleaned[:1200]}")
+            citations.append(
+                {
+                    "document": title,
+                    "slide": None,
+                    "chunk_id": f"processed_text_{citation_index}",
+                    "source_uri": doc.get("source_uri") or "",
+                    "text": cleaned[:1200],
+                }
+            )
+            citation_index += 1
+        if len(context_blocks) >= 4:
+            break
+
+    if not context_blocks:
+        return {}
+
+    prompt = (
+        "Answer the student's question using only the grounded processed document text below. "
+        "If the text does not contain enough information, say that there is not enough grounded context. "
+        "Be concise and cite source numbers in brackets when useful.\n\n"
+        f"Question: {question}\n\n"
+        "Grounded processed text:\n"
+        + "\n\n".join(context_blocks)
+        + "\n\nAnswer:"
+    )
+    try:
+        answer = _invoke_text_model(prompt)
+    except Exception:
+        return {}
+
+    answer = str(answer or "").strip()
+    if not answer:
+        return {}
+
+    return {
+        "answer": answer,
+        "citations": citations[:4],
+        "topic": citations[0]["document"] if citations else "General",
     }

@@ -576,7 +576,7 @@ def normalize_doc_ids(payload):
 
 def normalize_quiz_count(value):
     try:
-        return max(5, min(10, int(value or 5)))
+        return max(1, min(20, int(value or 5)))
     except (TypeError, ValueError):
         return 5
 
