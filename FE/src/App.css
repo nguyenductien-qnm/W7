@@ -339,6 +339,86 @@ textarea {
   min-width: 0;
 }
 
+.dashboard-panel {
+  border-bottom: 1px solid var(--line);
+  background: var(--panel-2);
+  padding: 12px 16px;
+  display: grid;
+  gap: 10px;
+}
+
+.dashboard-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.dashboard-head h2 {
+  margin: 0;
+  color: var(--ink);
+  font-family: "Cormorant Garamond", Georgia, serif;
+  font-size: 24px;
+  font-weight: 600;
+  line-height: 1.15;
+}
+
+.dashboard-head p {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.dashboard-stats,
+.topic-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.dashboard-stats span,
+.topic-strip span {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--canvas);
+  padding: 5px 9px;
+  font-size: 12px;
+}
+
+.dashboard-stats span {
+  color: var(--muted);
+}
+
+.topic-strip span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--body);
+}
+
+.topic-strip strong {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.topic-strip small {
+  min-width: 18px;
+  height: 18px;
+  border-radius: var(--radius-pill);
+  background: var(--primary-soft);
+  color: var(--primary-strong);
+  display: inline-grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.dashboard-empty {
+  padding: 12px;
+  text-align: left;
+}
+
 .soft-btn {
   min-height: 34px;
   padding: 7px 12px;
@@ -791,6 +871,20 @@ textarea {
   overflow: auto;
 }
 
+.planner-list {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.planner-detail {
+  scrollbar-width: none;
+}
+
+.planner-detail::-webkit-scrollbar {
+  display: none;
+}
+
 .planner-view-head,
 .planner-detail-head {
   display: flex;
@@ -798,6 +892,14 @@ textarea {
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 10px;
+}
+
+.planner-list .planner-view-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  flex: 0 0 auto;
+  background: var(--panel-2);
 }
 
 .planner-actions {
@@ -823,38 +925,16 @@ textarea {
   font-size: 13px;
 }
 
-.plan-editor {
-  border: 1px solid var(--line);
-  border-radius: var(--radius-md);
-  background: var(--canvas);
-  margin-bottom: 10px;
-  padding: 10px;
-  display: grid;
-  gap: 8px;
+.plan-scroll {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  padding-right: 2px;
+  scrollbar-width: none;
 }
 
-.plan-editor-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 8px;
-}
-
-.plan-editor-head strong {
-  color: var(--ink);
-  font-size: 13px;
-}
-
-.plan-editor input,
-.plan-editor textarea {
-  padding: 7px 9px;
-  font-size: 13px;
-}
-
-.plan-editor-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 7px;
+.plan-scroll::-webkit-scrollbar {
+  display: none;
 }
 
 .plan-row {
@@ -894,6 +974,58 @@ textarea {
   font-size: 11px;
   font-style: normal;
   white-space: nowrap;
+}
+
+.plan-modal {
+  display: grid;
+  gap: 12px;
+}
+
+.plan-modal-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.plan-modal-grid.two {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.form-field {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.form-field.wide {
+  grid-column: 1 / -1;
+}
+
+.form-field input,
+.form-field textarea {
+  min-height: 40px;
+  padding: 9px 11px;
+  font-size: 14px;
+}
+
+.form-field small,
+.form-error {
+  color: var(--error);
+}
+
+.form-field small {
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.form-error {
+  border: 1px solid rgba(198, 69, 69, 0.28);
+  border-radius: var(--radius-md);
+  background: rgba(198, 69, 69, 0.08);
+  padding: 9px 11px;
+  font-size: 13px;
 }
 
 .plan-meta-grid {
@@ -1584,6 +1716,15 @@ textarea {
     grid-template-columns: 1fr;
     max-height: none;
     overflow: visible;
+  }
+
+  .planner-list {
+    max-height: 44vh;
+  }
+
+  .plan-modal-grid,
+  .plan-modal-grid.two {
+    grid-template-columns: 1fr;
   }
 
   .planner-panel.full {

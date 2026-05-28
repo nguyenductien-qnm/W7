@@ -21,6 +21,8 @@ Resources:
         AllowMethods:
           - GET
           - POST
+          - PUT
+          - PATCH
           - DELETE
           - OPTIONS
         AllowOrigins:
@@ -355,6 +357,12 @@ Resources:
             ApiId: !Ref StudyBotApi
             Path: /planner
             Method: POST
+        PlannerClarifyApi:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref StudyBotApi
+            Path: /planner/clarify
+            Method: POST
         PlannerListApi:
           Type: HttpApi
           Properties:
@@ -415,6 +423,12 @@ Resources:
           Properties:
             ApiId: !Ref StudyBotApi
             Path: /history
+            Method: GET
+        DashboardApi:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref StudyBotApi
+            Path: /dashboard
             Method: GET
 
 Outputs:

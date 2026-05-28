@@ -297,6 +297,22 @@ function blankPlanForm() {
   };
 }
 
+function isSkipReply(value) {
+  return ["skip", "blank", "none", "no", "nope", "n/a", "na"].includes(String(value || "").trim().toLowerCase());
+}
+
+function splitList(value) {
+  return String(value || "")
+    .split(/[,;\n]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function fieldErrorMessage(body, fallback) {
+  if (body?.field_errors && typeof body.field_errors === "object") return body.field_errors;
+  return fallback ? { form: fallback } : {};
+}
+
 function renderPlanText(plan) {
   const tasks = safeArray(plan?.tasks);
   const lines = [plan?.summary || "Exam plan ready.", ""];
@@ -391,9 +407,14 @@ export default function App() {
 
   const [docs, setDocs] = useState([]);
   const [plans, setPlans] = useState([]);
+  const [dashboard, setDashboard] = useState(null);
+  const [dashboardOpen, setDashboardOpen] = useState(true);
   const [activePlan, setActivePlan] = useState(null);
   const [planForm, setPlanForm] = useState(() => blankPlanForm());
   const [editingPlanId, setEditingPlanId] = useState("");
+  const [planModalOpen, setPlanModalOpen] = useState(false);
+  const [planFormErrors, setPlanFormErrors] = useState({});
+  const [pendingPlannerBySession, setPendingPlannerBySession] = useState({});
   const [selectedDocIds, setSelectedDocIds] = useState(() =>
     loadJson(storageKey(currentUserId, "selected-docs"), [])
   );
@@ -418,6 +439,7 @@ export default function App() {
     login: false,
     send: false,
     plans: false,
+    dashboard: false,
   });
 
   const chatRef = useRef(null);
@@ -464,6 +486,7 @@ export default function App() {
       await refreshSessions();
       await refreshDocs();
       await refreshPlans(activeSessionId);
+      await refreshDashboard("all");
     }
     boot();
   }, [currentUserId]);
@@ -472,6 +495,7 @@ export default function App() {
     refreshDocs();
     refreshHistory(activeSessionId);
     refreshPlans(activeSessionId);
+    refreshDashboard("all");
   }, [activeSessionId]);
 
   useEffect(() => {
@@ -526,7 +550,12 @@ export default function App() {
       body = text;
     }
     pushLog(`${opts.method || "GET"} ${path}`, body);
-    if (!res.ok) throw new Error(body?.detail || body?.message || `HTTP ${res.status}`);
+    if (!res.ok) {
+      const error = new Error(body?.detail || body?.message || `HTTP ${res.status}`);
+      error.body = body;
+      error.status = res.status;
+      throw error;
+    }
     return body;
   }
 
@@ -675,14 +704,8 @@ export default function App() {
 
   function planFormPayload() {
     const parsedPrompt = parsePlannerPrompt(planForm.prompt);
-    const weakTopics = String(planForm.weak_topics || "")
-      .split(",")
-      .map((item) => item.trim())
-      .filter(Boolean);
-    const excludedDays = String(planForm.excluded_days || "")
-      .split(",")
-      .map((item) => item.trim())
-      .filter(Boolean);
+    const weakTopics = splitList(planForm.weak_topics);
+    const excludedDays = splitList(planForm.excluded_days);
     const readyDocIds = new Set(readyDocs.map((doc) => doc.doc_id));
     const plannerDocIds = selectedDocIds.filter((docId) => readyDocIds.has(docId));
     return {
@@ -707,8 +730,46 @@ export default function App() {
     };
   }
 
+  async function refreshDashboard(sessionId = "all") {
+    setBusyFlag("dashboard", true);
+    try {
+      const targetSession = sessionId || "all";
+      const body = await call(`/dashboard?session_id=${encodeURIComponent(targetSession)}&days=7`);
+      setDashboard(body);
+    } catch (err) {
+      showToast(`Dashboard load failed: ${err.message}`);
+    } finally {
+      setBusyFlag("dashboard", false);
+    }
+  }
+
+  function validatePlanForm() {
+    const errors = {};
+    if (!String(planForm.exam_date || "").trim()) {
+      errors.exam_date = "Exam date is required.";
+    }
+    const dailyText = String(planForm.daily_study_hours || "").trim();
+    const weeklyText = String(planForm.weekly_study_hours || "").trim();
+    if (!dailyText && !weeklyText) {
+      errors.daily_study_hours = "Enter daily or weekly hours.";
+      errors.weekly_study_hours = "Enter daily or weekly hours.";
+    }
+    [
+      ["daily_study_hours", dailyText],
+      ["weekly_study_hours", weeklyText],
+      ["preferred_session_length", String(planForm.preferred_session_length || "").trim()],
+    ].forEach(([field, value]) => {
+      if (!value) return;
+      const number = Number(value);
+      if (!Number.isFinite(number) || number <= 0) errors[field] = "Use a positive number.";
+    });
+    setPlanFormErrors(errors);
+    return !Object.keys(errors).length;
+  }
+
   async function savePlanFromPanel(event) {
     event?.preventDefault();
+    if (!validatePlanForm()) return;
     setBusyFlag("plans", true);
     try {
       const payload = planFormPayload();
@@ -719,33 +780,53 @@ export default function App() {
         method: editingPlanId ? "PUT" : "POST",
         json: payload,
       });
-      setActivePlan(body);
       setEditingPlanId("");
       setPlanForm(blankPlanForm());
+      setPlanFormErrors({});
+      setPlanModalOpen(false);
       await refreshPlans(activeSessionId);
+      setActivePlan(body);
+      await refreshDashboard("all");
       showToast(editingPlanId ? "Plan updated." : "Plan created.");
     } catch (err) {
+      setPlanFormErrors(fieldErrorMessage(err.body, err.message));
       showToast(err.message);
     } finally {
       setBusyFlag("plans", false);
     }
   }
 
+  function openNewPlanModal() {
+    setEditingPlanId("");
+    setPlanForm(blankPlanForm());
+    setPlanFormErrors({});
+    setPlanModalOpen(true);
+  }
+
   function editPlan(plan) {
     if (!plan) return;
     setEditingPlanId(plan.plan_id || "");
     setPlannerOpen(true);
+    setPlanFormErrors({});
     setPlanForm({
       ...blankPlanForm(),
       prompt: plan.summary || "",
       exam_date: plan.exam_date || "",
+      daily_study_hours: plan.daily_study_hours ?? "",
+      weekly_study_hours: plan.weekly_study_hours ?? "",
+      preferred_session_length: plan.preferred_session_length ?? "60",
       weak_topics: safeArray(plan.weak_topics).join(", "),
+      excluded_days: safeArray(plan.excluded_days).join(", "),
+      target_grade: plan.target_grade || plan.target_exam || "",
     });
+    setPlanModalOpen(true);
   }
 
   function cancelPlanEdit() {
     setEditingPlanId("");
     setPlanForm(blankPlanForm());
+    setPlanFormErrors({});
+    setPlanModalOpen(false);
   }
 
   function applyPlanDocIds(docIds, label = "Plan documents selected.") {
@@ -978,6 +1059,7 @@ export default function App() {
         }
       }
       await refreshDocs();
+      await refreshDashboard("all");
       showToast("Upload complete. Processing may take a minute.");
     } catch (err) {
       showToast(err.message);
@@ -1008,6 +1090,73 @@ export default function App() {
         ...(message?.openCitations || {}),
         [index]: !message?.openCitations?.[index],
       },
+    });
+  }
+
+  function plannerDocPayload(scopedDocIds) {
+    const readyDocIds = new Set(readyDocs.map((doc) => doc.doc_id));
+    const plannerDocIds = scopedDocIds.filter((docId) => readyDocIds.has(docId));
+    return plannerDocIds.length ? { doc_id: plannerDocIds[0], selected_doc_ids: plannerDocIds } : {};
+  }
+
+  async function clarifyPlannerRequest(prompt, scopedDocIds, botId) {
+    const pending = pendingPlannerBySession[activeSessionId] || null;
+    const priorFields = pending?.fields || {};
+    const combinedPrompt = pending?.originalPrompt && !isSkipReply(prompt)
+      ? `${pending.originalPrompt}\n${prompt}`
+      : prompt;
+    const clarification = await call("/planner/clarify", {
+      method: "POST",
+      json: {
+        prompt: combinedPrompt,
+        question: combinedPrompt,
+        prior_fields: priorFields,
+        user_id: currentUserId,
+        session_id: activeSessionId,
+      },
+    });
+
+    if (!clarification.ready) {
+      setPendingPlannerBySession((prev) => ({
+        ...prev,
+        [activeSessionId]: {
+          originalPrompt: pending?.originalPrompt || prompt,
+          fields: clarification.fields || priorFields,
+        },
+      }));
+      updateMessage(botId, {
+        text: clarification.clarification_question || "What exam date and study hours should I use?",
+        loading: false,
+      });
+      return;
+    }
+
+    const fields = clarification.fields || {};
+    const body = await call("/planner", {
+      method: "POST",
+      json: {
+        ...fields,
+        prompt: combinedPrompt,
+        question: combinedPrompt,
+        user_id: currentUserId,
+        session_id: activeSessionId,
+        ...plannerDocPayload(scopedDocIds),
+      },
+    });
+    setPendingPlannerBySession((prev) => {
+      const next = { ...prev };
+      delete next[activeSessionId];
+      return next;
+    });
+    setActivePlan(body);
+    setPlannerOpen(true);
+    await refreshPlans(activeSessionId);
+    setActivePlan(body);
+    await refreshDashboard("all");
+    updateMessage(botId, {
+      text: renderPlanText(body),
+      plan: body,
+      loading: false,
     });
   }
 
@@ -1117,29 +1266,9 @@ export default function App() {
           loading: false,
         });
       } else {
-        const readyDocIds = new Set(readyDocs.map((doc) => doc.doc_id));
-        const plannerDocIds = scopedDocIds.filter((docId) => readyDocIds.has(docId));
-        const body = await call("/planner", {
-          method: "POST",
-          json: {
-            prompt,
-            question: prompt,
-            user_id: currentUserId,
-            session_id: activeSessionId,
-            ...(plannerDocIds.length
-              ? { doc_id: plannerDocIds[0], selected_doc_ids: plannerDocIds }
-              : {}),
-          },
-        });
-        setActivePlan(body);
-        setPlannerOpen(true);
-        await refreshPlans(activeSessionId);
-        updateMessage(botId, {
-          text: renderPlanText(body),
-          plan: body,
-          loading: false,
-        });
+        await clarifyPlannerRequest(prompt, scopedDocIds, botId);
       }
+      await refreshDashboard("all");
     } catch (err) {
       updateMessage(botId, { text: `Error: ${err.message}`, loading: false, error: true });
     } finally {
@@ -1172,6 +1301,9 @@ export default function App() {
     if (auth.userId) return `${auth.email} (${auth.userId})`;
     return `Local: ${LOCAL_USER}`;
   }, [auth]);
+
+  const dashboardTotals = dashboard?.totals || {};
+  const dashboardTopics = safeArray(dashboard?.topics).slice(0, 10);
 
   return (
     <div
@@ -1283,15 +1415,14 @@ export default function App() {
             >
               Plans
             </button>
-            <button className="soft-btn" onClick={refreshDocs} disabled={busy.docs}>
-              {busy.docs ? "Refreshing..." : "Refresh"}
-            </button>
             <button
-              className="soft-btn"
-              onClick={() => setDebugOpen((prev) => !prev)}
-              title="Toggle debug console (Ctrl+`)"
+              className={`soft-btn ${dashboardOpen ? "active" : ""}`}
+              onClick={() => {
+                setDashboardOpen((prev) => !prev);
+                refreshDashboard("all");
+              }}
             >
-              Debug
+              Dashboard
             </button>
             <button
               className="icon-btn"
@@ -1303,6 +1434,39 @@ export default function App() {
           </div>
         </header>
 
+        {dashboardOpen && (
+          <section className="dashboard-panel" aria-label="Topics studied this week">
+            <div className="dashboard-head">
+              <div>
+                <h2>Topics studied this week</h2>
+                <p>{busy.dashboard ? "Refreshing activity..." : `${dashboardTotals.topics || 0} topics from recent study activity`}</p>
+              </div>
+              <button className="soft-btn" onClick={() => refreshDashboard("all")} disabled={busy.dashboard}>
+                Refresh
+              </button>
+            </div>
+            <div className="dashboard-stats">
+              <span>{dashboardTotals.questions || 0} questions</span>
+              <span>{dashboardTotals.quizzes || 0} quizzes</span>
+              <span>{dashboardTotals.flashcards || 0} card sets</span>
+              <span>{dashboardTotals.summaries || 0} summaries</span>
+              <span>{dashboardTotals.plans || 0} plans</span>
+            </div>
+            {dashboardTopics.length ? (
+              <div className="topic-strip">
+                {dashboardTopics.map((item) => (
+                  <span key={`${item.topic}-${item.last_studied_at}`}>
+                    <strong>{item.topic}</strong>
+                    <small>{item.count}</small>
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <div className="empty-state dashboard-empty">No study activity in the last 7 days.</div>
+            )}
+          </section>
+        )}
+
         {plannerOpen && (
           <section className="planner-view" aria-label="Exam planner">
             <div className="planner-list">
@@ -1311,91 +1475,37 @@ export default function App() {
                   <h2>Saved Plans</h2>
                   <p>{busy.plans ? "Loading plans..." : `${plans.length} plan${plans.length === 1 ? "" : "s"}`}</p>
                 </div>
-                <button className="soft-btn" onClick={() => refreshPlans(activeSessionId)} disabled={busy.plans}>
-                  Refresh
-                </button>
-              </div>
-              <form className="plan-editor" onSubmit={savePlanFromPanel}>
-                <div className="plan-editor-head">
-                  <strong>{editingPlanId ? "Edit Plan" : "Manual Plan"}</strong>
-                  {editingPlanId ? (
-                    <button className="link-btn" type="button" onClick={cancelPlanEdit}>
-                      Cancel
-                    </button>
-                  ) : null}
-                </div>
-                <textarea
-                  value={planForm.prompt}
-                  onChange={(event) => setPlanForm((prev) => ({ ...prev, prompt: event.target.value }))}
-                  placeholder="Natural language plan request..."
-                  rows={2}
-                />
-                <div className="plan-editor-grid">
-                  <input
-                    value={planForm.exam_date}
-                    onChange={(event) => setPlanForm((prev) => ({ ...prev, exam_date: event.target.value }))}
-                    placeholder="YYYY-MM-DD"
-                  />
-                  <input
-                    value={planForm.daily_study_hours}
-                    onChange={(event) => setPlanForm((prev) => ({ ...prev, daily_study_hours: event.target.value }))}
-                    placeholder="Daily hrs"
-                    inputMode="decimal"
-                  />
-                  <input
-                    value={planForm.weekly_study_hours}
-                    onChange={(event) => setPlanForm((prev) => ({ ...prev, weekly_study_hours: event.target.value }))}
-                    placeholder="Weekly hrs"
-                    inputMode="decimal"
-                  />
-                  <input
-                    value={planForm.preferred_session_length}
-                    onChange={(event) => setPlanForm((prev) => ({ ...prev, preferred_session_length: event.target.value }))}
-                    placeholder="Min/session"
-                    inputMode="numeric"
-                  />
-                </div>
-                <input
-                  value={planForm.weak_topics}
-                  onChange={(event) => setPlanForm((prev) => ({ ...prev, weak_topics: event.target.value }))}
-                  placeholder="Weak topics, comma separated"
-                />
-                <div className="plan-editor-grid">
-                  <input
-                    value={planForm.excluded_days}
-                    onChange={(event) => setPlanForm((prev) => ({ ...prev, excluded_days: event.target.value }))}
-                    placeholder="Excluded days"
-                  />
-                  <input
-                    value={planForm.target_grade}
-                    onChange={(event) => setPlanForm((prev) => ({ ...prev, target_grade: event.target.value }))}
-                    placeholder="Target"
-                  />
-                </div>
-                <button className="soft-btn primary" type="submit" disabled={busy.plans || !readyDocs.length}>
-                  {editingPlanId ? "Update Plan" : "Create Plan"}
-                </button>
-              </form>
-              {plans.length ? (
-                plans.map((plan) => (
-                  <button
-                    className={`plan-row ${activePlan?.plan_id === plan.plan_id ? "active" : ""}`}
-                    key={plan.plan_id}
-                    onClick={() => openPlan(plan.plan_id)}
-                  >
-                    <span>
-                      <strong>{dateLabel(plan.exam_date) || plan.exam_date}</strong>
-                      <small>{dateLabel(plan.created_at || plan.generated_at)}</small>
-                    </span>
-                    <em>
-                      {plan.selected_doc_count ?? safeArray(plan.selected_doc_ids).length} docs /{" "}
-                      {plan.task_count ?? safeArray(plan.tasks).length} tasks
-                    </em>
+                <div className="planner-actions">
+                  <button className="soft-btn primary" onClick={openNewPlanModal} disabled={!readyDocs.length}>
+                    Add Plan
                   </button>
-                ))
-              ) : (
-                <div className="empty-state">No saved plans in this session.</div>
-              )}
+                  <button className="soft-btn" onClick={() => refreshPlans(activeSessionId)} disabled={busy.plans}>
+                    Refresh
+                  </button>
+                </div>
+              </div>
+              <div className="plan-scroll">
+                {plans.length ? (
+                  plans.map((plan) => (
+                    <button
+                      className={`plan-row ${activePlan?.plan_id === plan.plan_id ? "active" : ""}`}
+                      key={plan.plan_id}
+                      onClick={() => openPlan(plan.plan_id)}
+                    >
+                      <span>
+                        <strong>{dateLabel(plan.exam_date) || plan.exam_date}</strong>
+                        <small>{dateLabel(plan.created_at || plan.generated_at)}</small>
+                      </span>
+                      <em>
+                        {plan.selected_doc_count ?? safeArray(plan.selected_doc_ids).length} docs /{" "}
+                        {plan.task_count ?? safeArray(plan.tasks).length} tasks
+                      </em>
+                    </button>
+                  ))
+                ) : (
+                  <div className="empty-state">No saved plans in this session.</div>
+                )}
+              </div>
             </div>
             <div className="planner-detail">
               {activePlan ? (
@@ -1693,6 +1803,107 @@ export default function App() {
         </section>
       )}
 
+      {planModalOpen && (
+        <div className="modal-backdrop" onMouseDown={cancelPlanEdit}>
+          <form className="modal plan-modal" onSubmit={savePlanFromPanel} onMouseDown={(event) => event.stopPropagation()}>
+            <div className="modal-head">
+              <div>
+                <h2>{editingPlanId ? "Edit Plan" : "Add Plan"}</h2>
+                <p>Exam date and either daily or weekly study hours are required.</p>
+              </div>
+              <button className="icon-btn" type="button" onClick={cancelPlanEdit}>
+                x
+              </button>
+            </div>
+            {planFormErrors.form ? <div className="form-error">{planFormErrors.form}</div> : null}
+            <label className="form-field wide">
+              <span>Natural language request</span>
+              <textarea
+                value={planForm.prompt}
+                onChange={(event) => setPlanForm((prev) => ({ ...prev, prompt: event.target.value }))}
+                placeholder="Focus on calculus and proofs, avoid Sundays..."
+                rows={3}
+              />
+            </label>
+            <div className="plan-modal-grid">
+              <label className="form-field">
+                <span>Exam date</span>
+                <input
+                  value={planForm.exam_date}
+                  onChange={(event) => setPlanForm((prev) => ({ ...prev, exam_date: event.target.value }))}
+                  placeholder="YYYY-MM-DD"
+                />
+                {planFormErrors.exam_date ? <small>{planFormErrors.exam_date}</small> : null}
+              </label>
+              <label className="form-field">
+                <span>Daily hours</span>
+                <input
+                  value={planForm.daily_study_hours}
+                  onChange={(event) => setPlanForm((prev) => ({ ...prev, daily_study_hours: event.target.value }))}
+                  placeholder="2"
+                  inputMode="decimal"
+                />
+                {planFormErrors.daily_study_hours ? <small>{planFormErrors.daily_study_hours}</small> : null}
+              </label>
+              <label className="form-field">
+                <span>Weekly hours</span>
+                <input
+                  value={planForm.weekly_study_hours}
+                  onChange={(event) => setPlanForm((prev) => ({ ...prev, weekly_study_hours: event.target.value }))}
+                  placeholder="10"
+                  inputMode="decimal"
+                />
+                {planFormErrors.weekly_study_hours ? <small>{planFormErrors.weekly_study_hours}</small> : null}
+              </label>
+              <label className="form-field">
+                <span>Session length</span>
+                <input
+                  value={planForm.preferred_session_length}
+                  onChange={(event) => setPlanForm((prev) => ({ ...prev, preferred_session_length: event.target.value }))}
+                  placeholder="60"
+                  inputMode="numeric"
+                />
+                {planFormErrors.preferred_session_length ? <small>{planFormErrors.preferred_session_length}</small> : null}
+              </label>
+            </div>
+            <label className="form-field wide">
+              <span>Weak topics</span>
+              <input
+                value={planForm.weak_topics}
+                onChange={(event) => setPlanForm((prev) => ({ ...prev, weak_topics: event.target.value }))}
+                placeholder="limits, integration, proofs"
+              />
+            </label>
+            <div className="plan-modal-grid two">
+              <label className="form-field">
+                <span>Excluded days</span>
+                <input
+                  value={planForm.excluded_days}
+                  onChange={(event) => setPlanForm((prev) => ({ ...prev, excluded_days: event.target.value }))}
+                  placeholder="Sunday, 2026-06-10"
+                />
+              </label>
+              <label className="form-field">
+                <span>Target grade/exam</span>
+                <input
+                  value={planForm.target_grade}
+                  onChange={(event) => setPlanForm((prev) => ({ ...prev, target_grade: event.target.value }))}
+                  placeholder="A, final exam"
+                />
+              </label>
+            </div>
+            <div className="modal-actions">
+              <button type="button" onClick={cancelPlanEdit}>
+                Cancel
+              </button>
+              <button className="primary" type="submit" disabled={busy.plans || !readyDocs.length}>
+                {editingPlanId ? "Update Plan" : "Create Plan"}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
       {fileModalOpen && (
         <div className="modal-backdrop" onMouseDown={() => setFileModalOpen(false)}>
           <div className="modal" onMouseDown={(event) => event.stopPropagation()}>
@@ -1717,6 +1928,9 @@ export default function App() {
               </label>
               <button className="soft-btn" onClick={autoSelectReady}>
                 Auto-select ready
+              </button>
+              <button className="soft-btn" onClick={refreshDocs} disabled={busy.docs}>
+                {busy.docs ? "Refreshing..." : "Refresh"}
               </button>
             </div>
             <div className="doc-picker">

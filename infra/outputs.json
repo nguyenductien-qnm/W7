@@ -1,0 +1,29 @@
+{
+  "StudyBotInfraStack": {
+    "QuizLambdaName": "StudyBotInfraStack-StudyBotQuizLambda74D3DBAC-p49zhC1VKdUo",
+    "AgentCoreGatewayUrl": "https://studybot-tools-jvjik80lgi.gateway.bedrock-agentcore.ap-southeast-1.amazonaws.com/mcp",
+    "ProcessPdfLambdaName": "StudyBotInfraStack-ProcessPdfLambda9E4AD41C-rSjb6gPAwkZE",
+    "SummaryLambdaName": "StudyBotInfraStack-StudyBotSummaryLambda9747F23E-i9OCNShYC52T",
+    "VectorIndexArn": "arn:aws:s3vectors:ap-southeast-1:589077667575:bucket/studybot-vectors-589077667575-ap-southeast-1/index/studybot-kb-index",
+    "KnowledgeBaseId": "LI32IWLOB5",
+    "IngestionFailureMetricName": "StudyBot/W7/IngestionFailures",
+    "HistoryLambdaName": "StudyBotInfraStack-StudyBotHistoryLambdaA392710D-uLYmqJWC7WqP",
+    "HttpApiUrl": "https://3sgavxe4c0.execute-api.ap-southeast-1.amazonaws.com",
+    "DocumentsTableName": "StudyBotDocuments",
+    "DocumentsLambdaName": "StudyBotInfraStack-StudyBotDocumentsLambda446BD67A-usjOkvIHE0aE",
+    "LoginLambdaName": "StudyBotInfraStack-StudyBotLoginLambda7CCA4A44-1cOPmvFXjpoo",
+    "UploadLambdaName": "StudyBotInfraStack-StudyBotUploadLambda601DAEF7-G6VRjQ87JgH2",
+    "PlannerLambdaName": "StudyBotInfraStack-StudyBotPlannerLambdaE09BB38F-PC0j0DGVuB8K",
+    "ApiCustomDomain": "api.nguyenductien.cloud",
+    "FrontendCustomDomain": "nguyenductien.cloud",
+    "SessionsLambdaName": "StudyBotInfraStack-StudyBotSessionsLambda10C5CCF3-KdTGBOgZdula",
+    "OperationsDashboardName": "StudyBot-W7-Operations",
+    "VpcId": "vpc-06d2de3b6e14576ca",
+    "FrontendBucketName": "studybotinfrastack-studybotfrontendbucket0d64d827-ve7senepf9rg",
+    "AgentCoreGatewayId": "studybot-tools-jvjik80lgi",
+    "UploadsBucketName": "studybotdatastack-uploadbucketd2c1da78-2cpeowy02vjk",
+    "QaLambdaName": "StudyBotInfraStack-StudyBotQaLambda00A30CC0-9vNZtze8ttev",
+    "DataSourceId": "V0ISBKEMXT",
+    "FrontendCloudFrontDomain": "d202pyjoa7b4uh.cloudfront.net"
+  }
+}

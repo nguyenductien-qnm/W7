@@ -65,7 +65,7 @@ def cors_headers():
     return {
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Headers": "Content-Type,Authorization,X-User-Id,X-Session-Id",
-        "Access-Control-Allow-Methods": "GET,POST,DELETE,OPTIONS",
+        "Access-Control-Allow-Methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
     }
 
 
@@ -230,6 +230,11 @@ def refresh_doc_status_from_ingestion(doc_item):
         ingestion_job = response_data.get("ingestionJob", {})
         ingestion_status = str(ingestion_job.get("status", "IN_PROGRESS")).upper()
         kb_status = map_ingestion_status_to_kb(ingestion_status)
+        processed_key = str(doc_item.get("processed_text_s3_key") or doc_item.get("processed_s3_key") or "")
+        failure_reasons = ingestion_job.get("failureReasons") or []
+        failure_text = "\n".join(str(reason) for reason in failure_reasons)
+        if ingestion_status == "COMPLETE" and processed_key and processed_key in failure_text:
+            kb_status = "FAILED"
 
         updated_doc = {
             **doc_item,
@@ -237,6 +242,8 @@ def refresh_doc_status_from_ingestion(doc_item):
             "kb_status": kb_status,
             "ingestion_updated_at": now_iso(),
         }
+        if kb_status == "FAILED" and failure_text:
+            updated_doc["failure_reason"] = failure_text[:1000]
         TABLE.put_item(Item=updated_doc)
 
         return updated_doc

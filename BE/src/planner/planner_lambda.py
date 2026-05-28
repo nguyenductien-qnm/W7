@@ -3,6 +3,7 @@ import os
 import re
 import uuid
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 
 import boto3
 
@@ -26,6 +27,7 @@ from tool_contract import parse_http_response, run_tool_handler, tool_name_from_
 
 
 ACTIVITY_SEQUENCE = ("review", "flashcards", "quiz", "practice", "recap")
+SKIP_WORDS = {"skip", "blank", "none", "no", "nope", "n/a", "na"}
 AWS_REGION = os.environ.get("AWS_REGION", "ap-southeast-1")
 BEDROCK_GENERATION_MODEL_ID = os.environ.get(
     "BEDROCK_GENERATION_MODEL_ID",
@@ -45,6 +47,8 @@ def sk_exam_plan_history(created_at_iso, plan_id, event_id=None):
 
 
 def _parse_date(value):
+    if value in (None, ""):
+        return None
     try:
         return datetime.strptime(str(value or ""), "%Y-%m-%d").date()
     except ValueError:
@@ -165,6 +169,12 @@ User request: {prompt_text}
 
 def _normalize_planner_payload(payload):
     normalized = dict(payload or {})
+    prior_fields = normalized.get("prior_fields")
+    if isinstance(prior_fields, dict):
+        for key, value in prior_fields.items():
+            if normalized.get(key) in (None, "", []):
+                normalized[key] = value
+    normalized.pop("prior_fields", None)
     prompt_text = normalized.get("prompt") or normalized.get("question") or normalized.get("message") or ""
     deterministic = _parse_planner_prompt_deterministic(prompt_text)
     for key, value in deterministic.items():
@@ -181,6 +191,143 @@ def _normalize_planner_payload(payload):
             if normalized.get(key) in (None, "", []):
                 normalized[key] = value
     return normalized
+
+
+def _is_skip_reply(value):
+    text = str(value or "").strip().lower()
+    return text in SKIP_WORDS
+
+
+def _normalize_string_array(value):
+    if value in (None, ""):
+        return []
+    if isinstance(value, str):
+        values = re.split(r"[,;\n]+", value)
+    elif isinstance(value, (list, tuple, set)):
+        values = value
+    else:
+        values = [value]
+    return [str(item).strip() for item in values if str(item).strip()]
+
+
+def _parse_bounded_number(value, field, label, minimum, maximum, errors):
+    if value in (None, ""):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        errors[field] = f"{label} must be numeric."
+        return None
+    if parsed <= 0:
+        errors[field] = f"{label} must be greater than 0."
+        return None
+    if parsed < minimum or parsed > maximum:
+        errors[field] = f"{label} must be between {minimum:g} and {maximum:g}."
+        return None
+    return parsed
+
+
+def _decimal_or_none(value):
+    if value in (None, ""):
+        return None
+    try:
+        return Decimal(str(value))
+    except Exception:
+        return None
+
+
+def _validate_and_normalize_planner_payload(payload, require_fields=True):
+    normalized = _normalize_planner_payload(payload)
+    errors = {}
+
+    exam_date_value = normalized.get("exam_date")
+    exam_date = _parse_date(exam_date_value)
+    if exam_date:
+        normalized["exam_date"] = exam_date.isoformat()
+    elif exam_date_value not in (None, ""):
+        errors["exam_date"] = "Exam date must be a valid YYYY-MM-DD date."
+
+    daily = _parse_bounded_number(
+        normalized.get("daily_study_hours") or normalized.get("hours_per_day") or normalized.get("daily_hours"),
+        "daily_study_hours",
+        "Daily study hours",
+        0.25,
+        12,
+        errors,
+    )
+    weekly = _parse_bounded_number(
+        normalized.get("weekly_study_hours") or normalized.get("hours_per_week") or normalized.get("weekly_hours"),
+        "weekly_study_hours",
+        "Weekly study hours",
+        0.25,
+        84,
+        errors,
+    )
+    session_length = _parse_bounded_number(
+        normalized.get("preferred_session_length") or normalized.get("preferred_session_minutes"),
+        "preferred_session_length",
+        "Preferred session length",
+        20,
+        180,
+        errors,
+    )
+
+    if daily is not None:
+        normalized["daily_study_hours"] = daily
+    if weekly is not None:
+        normalized["weekly_study_hours"] = weekly
+    if session_length is not None:
+        normalized["preferred_session_length"] = int(round(session_length))
+
+    normalized["weak_topics"] = _normalize_string_array(normalized.get("weak_topics"))
+    normalized["excluded_days"] = _normalize_string_array(normalized.get("excluded_days"))
+    for key in ("target_grade", "target_exam"):
+        if normalized.get(key) is not None:
+            normalized[key] = str(normalized.get(key)).strip()
+
+    missing_required = []
+    if require_fields:
+        if not exam_date and "exam_date" not in errors:
+            missing_required.append("exam_date")
+        if daily is None and weekly is None and "daily_study_hours" not in errors and "weekly_study_hours" not in errors:
+            missing_required.append("study_hours")
+
+    return normalized, missing_required, errors
+
+
+def _clarification_question(missing_required, field_errors):
+    if field_errors:
+        labels = []
+        if "exam_date" in field_errors:
+            labels.append("a valid exam date in YYYY-MM-DD format")
+        if "daily_study_hours" in field_errors or "weekly_study_hours" in field_errors:
+            labels.append("study hours as a positive number")
+        if "preferred_session_length" in field_errors:
+            labels.append("preferred session length in minutes")
+        return f"Please send {', '.join(labels)}."
+    if "exam_date" in missing_required and "study_hours" in missing_required:
+        return "What is your exam date, and how many hours can you study per day or per week?"
+    if "exam_date" in missing_required:
+        return "What is the exam date? Please use YYYY-MM-DD."
+    if "study_hours" in missing_required:
+        return "How many hours can you study per day or per week?"
+    return "Any weak topics, excluded days, session length, or target grade? You can say skip."
+
+
+def _planner_clarification(payload):
+    normalized, missing_required, errors = _validate_and_normalize_planner_payload(payload, require_fields=True)
+    prompt_text = normalized.get("prompt") or normalized.get("question") or normalized.get("message") or ""
+    skipped_optional = _is_skip_reply(prompt_text)
+    ready = not missing_required and not errors
+    unclear_optional = [] if ready or skipped_optional else []
+    return {
+        "ready": ready,
+        "fields": normalized,
+        "missing_required": missing_required,
+        "unclear_optional": unclear_optional,
+        "field_errors": errors,
+        "clarification_question": "" if ready else _clarification_question(missing_required, errors),
+    }
 
 
 def _positive_int(value, default=None, minimum=1, maximum=None):
@@ -209,22 +356,18 @@ def _normalize_excluded_days(values):
 
 
 def _availability(payload):
-    daily = _positive_int(
-        payload.get("daily_study_hours") or payload.get("hours_per_day") or payload.get("daily_hours"),
-        default=None,
-        minimum=1,
-        maximum=12,
-    )
-    weekly = _positive_int(
-        payload.get("weekly_study_hours") or payload.get("hours_per_week") or payload.get("weekly_hours"),
-        default=None,
-        minimum=1,
-        maximum=84,
-    )
+    try:
+        daily = float(payload.get("daily_study_hours") or payload.get("hours_per_day") or payload.get("daily_hours") or 0)
+    except (TypeError, ValueError):
+        daily = 0
+    try:
+        weekly = float(payload.get("weekly_study_hours") or payload.get("hours_per_week") or payload.get("weekly_hours") or 0)
+    except (TypeError, ValueError):
+        weekly = 0
     if daily:
-        return daily * 60, "daily"
+        return int(round(daily * 60)), "daily"
     if weekly:
-        return max(30, round((weekly * 60) / 5)), "weekly"
+        return max(30, int(round((weekly * 60) / 5))), "weekly"
     return None, ""
 
 
@@ -254,6 +397,12 @@ def _plan_public(item):
         "selected_doc_ids": item.get("selected_doc_ids") or [],
         "selected_documents": selected_documents,
         "weak_topics": item.get("weak_topics") or [],
+        "excluded_days": item.get("excluded_days") or [],
+        "daily_study_hours": item.get("daily_study_hours"),
+        "weekly_study_hours": item.get("weekly_study_hours"),
+        "preferred_session_length": item.get("preferred_session_length"),
+        "target_grade": item.get("target_grade"),
+        "target_exam": item.get("target_exam"),
         "tasks": item.get("tasks") or [],
         "created_at": item.get("created_at") or item.get("generated_at") or "",
         "generated_at": item.get("generated_at") or item.get("created_at") or "",
@@ -455,17 +604,22 @@ def _build_tasks(start_date, exam_date, minutes_per_study_day, preferred_session
 
 
 def _write_planner(event, plan_id=None):
-    payload = _normalize_planner_payload(parse_json_body(event))
+    payload, missing_required, field_errors = _validate_and_normalize_planner_payload(parse_json_body(event), require_fields=True)
     user_id = get_user_id(event, payload)
     session_id = get_session_id(event, payload) or "default"
     selected_doc_ids = normalize_doc_ids(payload)
     exam_date = _parse_date(payload.get("exam_date"))
     minutes_per_study_day, availability_mode = _availability(payload)
 
-    if not exam_date:
-        return response(400, {"message": "Tell me the exam date, or include it as YYYY-MM-DD."})
-    if not minutes_per_study_day:
-        return response(400, {"message": "Tell me the daily or weekly study hours."})
+    if field_errors or missing_required:
+        return response(
+            400,
+            {
+                "message": _clarification_question(missing_required, field_errors),
+                "field_errors": field_errors,
+                "missing_required": missing_required,
+            },
+        )
     today = datetime.now(timezone.utc).date()
     start_date = min(today, exam_date)
     weak_topics = [str(item).strip() for item in payload.get("weak_topics") or [] if str(item).strip()]
@@ -494,6 +648,7 @@ def _write_planner(event, plan_id=None):
 
     topics = _selected_topics(selected_docs, weak_topics, quiz_topics)
     excluded = _normalize_excluded_days(payload.get("excluded_days") or [])
+    normalized_excluded_days = sorted(excluded)
     preferred_session_length = _positive_int(
         payload.get("preferred_session_length") or payload.get("preferred_session_minutes"),
         default=60,
@@ -533,6 +688,12 @@ def _write_planner(event, plan_id=None):
         "selected_doc_ids": selected_ids,
         "selected_documents": selected_documents,
         "weak_topics": weak_topics,
+        "excluded_days": normalized_excluded_days,
+        "daily_study_hours": payload.get("daily_study_hours"),
+        "weekly_study_hours": payload.get("weekly_study_hours"),
+        "preferred_session_length": preferred_session_length,
+        "target_grade": payload.get("target_grade"),
+        "target_exam": payload.get("target_exam"),
     }
     generated_at = now_iso()
     item = {
@@ -544,6 +705,11 @@ def _write_planner(event, plan_id=None):
         "selected_doc_ids": selected_ids,
         "selected_documents": selected_documents,
         "target_grade": payload.get("target_grade"),
+        "target_exam": payload.get("target_exam"),
+        "daily_study_hours": _decimal_or_none(payload.get("daily_study_hours")),
+        "weekly_study_hours": _decimal_or_none(payload.get("weekly_study_hours")),
+        "preferred_session_length": preferred_session_length,
+        "excluded_days": normalized_excluded_days,
         "weak_topics": weak_topics,
         "summary": summary,
         "tasks": tasks,
@@ -560,6 +726,10 @@ def _write_planner(event, plan_id=None):
 
 def handle_planner(event):
     return _write_planner(event)
+
+
+def handle_planner_clarify(event):
+    return response(200, _planner_clarification(parse_json_body(event)))
 
 
 def handle_planner_list(event):
@@ -666,6 +836,8 @@ def route_request(event):
     http_info = request_context.get("http", {})
     method = http_info.get("method") or event.get("httpMethod", "")
     path = event.get("rawPath") or event.get("path", "")
+    if method == "POST" and path == "/planner/clarify":
+        return handle_planner_clarify(event)
     if method == "POST" and path == "/planner":
         return handle_planner(event)
     if method == "GET" and path == "/planner":
