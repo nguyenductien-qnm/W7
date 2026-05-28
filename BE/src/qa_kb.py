@@ -68,6 +68,7 @@ def _extract_document_name(source_uri, fallback, doc_titles_by_id=None):
 def _to_citation(result, fallback_document, doc_titles_by_id=None):
     source_uri = _extract_source_uri(result)
     metadata = result.get("metadata") or {}
+    text = _clean_text((result.get("content") or {}).get("text"))
 
     page = metadata.get("page") or metadata.get("page_number") or metadata.get("slide")
     try:
@@ -87,6 +88,7 @@ def _to_citation(result, fallback_document, doc_titles_by_id=None):
         "slide": page,
         "chunk_id": chunk_id,
         "source_uri": source_uri,
+        "text": text,
     }
 
 

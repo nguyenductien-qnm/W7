@@ -64,8 +64,8 @@ def now_iso():
 def cors_headers():
     return {
         "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "Content-Type,Authorization,X-User-Id",
-        "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type,Authorization,X-User-Id,X-Session-Id",
+        "Access-Control-Allow-Methods": "GET,POST,DELETE,OPTIONS",
     }
 
 
@@ -96,7 +96,8 @@ def parse_upload_body(event):
         data = parse_json_body(event)
         title = data.get("title") or data.get("file_name") or "uploaded.pdf"
         user_id = data.get("user_id") or DEMO_USER_ID
-        return title, user_id
+        session_id = data.get("session_id") or data.get("active_session_id") or "default"
+        return title, user_id, str(session_id)
 
     raw_bytes = base64.b64decode(body) if event.get("isBase64Encoded") else body.encode("utf-8")
     parser_input = f"Content-Type: {content_type}\nMIME-Version: 1.0\n\n".encode("utf-8") + raw_bytes
@@ -104,6 +105,7 @@ def parse_upload_body(event):
 
     title = "uploaded.pdf"
     user_id = DEMO_USER_ID
+    session_id = "default"
 
     for part in message.iter_parts():
         content_disposition = part.get("Content-Disposition", "")
@@ -114,8 +116,10 @@ def parse_upload_body(event):
             title = part.get_filename() or title
         elif name == "user_id":
             user_id = (part.get_content() or "").strip() or DEMO_USER_ID
+        elif name == "session_id":
+            session_id = (part.get_content() or "").strip() or "default"
 
-    return title, user_id
+    return title, user_id, session_id
 
 
 def get_user_id(event, payload=None):
@@ -132,6 +136,32 @@ def get_user_id(event, payload=None):
         return headers.get("x-user-id")
 
     return DEMO_USER_ID
+
+
+def get_session_id(event, payload=None):
+    payload = payload or {}
+    session_id = payload.get("session_id") or payload.get("active_session_id")
+    if session_id:
+        return str(session_id)
+
+    query = event.get("queryStringParameters") or {}
+    if query.get("session_id"):
+        return str(query.get("session_id"))
+
+    headers = {k.lower(): v for k, v in (event.get("headers") or {}).items()}
+    if headers.get("x-session-id"):
+        return str(headers.get("x-session-id"))
+
+    return ""
+
+
+def doc_in_session(doc_item, session_id):
+    if not session_id:
+        return True
+    doc_session_id = str(doc_item.get("session_id") or "default")
+    if session_id == "default":
+        return doc_session_id in ("", "default")
+    return doc_session_id == session_id
 
 
 def safe_filename(name):
@@ -208,6 +238,7 @@ def refresh_doc_status_from_ingestion(doc_item):
                 doc_id=updated_doc.get("doc_id"),
                 summary=summary_text_for(updated_doc.get("title", "uploaded.pdf")),
                 testable_concepts=testable_concepts_for(concepts),
+                session_id=updated_doc.get("session_id", "default"),
             )
 
         return updated_doc
@@ -225,6 +256,10 @@ def sk_profile():
 
 def sk_doc(doc_id):
     return f"DOC#{doc_id}"
+
+
+def sk_session(session_id):
+    return f"SESSION#{session_id}"
 
 
 def sk_summary(doc_id):
@@ -325,6 +360,10 @@ def get_doc(user_id, doc_id):
     return TABLE.get_item(Key={"PK": pk_user(user_id), "SK": sk_doc(doc_id)}).get("Item")
 
 
+def get_session(user_id, session_id):
+    return TABLE.get_item(Key={"PK": pk_user(user_id), "SK": sk_session(session_id)}).get("Item")
+
+
 def get_summary(user_id, doc_id):
     return TABLE.get_item(Key={"PK": pk_user(user_id), "SK": sk_summary(doc_id)}).get("Item")
 
@@ -335,7 +374,56 @@ def get_quiz(user_id, doc_id):
 
 def list_user_items(user_id):
     result = TABLE.query(KeyConditionExpression=Key("PK").eq(pk_user(user_id)))
-    return result.get("Items", [])
+    items = result.get("Items", [])
+    while result.get("LastEvaluatedKey"):
+        result = TABLE.query(
+            KeyConditionExpression=Key("PK").eq(pk_user(user_id)),
+            ExclusiveStartKey=result["LastEvaluatedKey"],
+        )
+        items.extend(result.get("Items", []))
+    return items
+
+
+def public_session(item):
+    session_id = item.get("session_id", "default")
+    session_name = item.get("session_name", "Study Session")
+    return {
+        "session_id": session_id,
+        "id": session_id,
+        "session_name": session_name,
+        "name": session_name,
+        "created_at": item.get("created_at", ""),
+        "updated_at": item.get("updated_at", ""),
+    }
+
+
+def ensure_session(user_id, session_id="default", session_name=None):
+    session_id = str(session_id or "default")
+    existing = get_session(user_id, session_id)
+    if existing:
+        return existing
+
+    created_at = now_iso()
+    item = {
+        "PK": pk_user(user_id),
+        "SK": sk_session(session_id),
+        "session_id": session_id,
+        "session_name": session_name or ("Default Session" if session_id == "default" else "New Session"),
+        "created_at": created_at,
+        "updated_at": created_at,
+    }
+    TABLE.put_item(Item=item)
+    return item
+
+
+def list_sessions(user_id):
+    ensure_session(user_id, "default", "Default Session")
+    items = [
+        item for item in list_user_items(user_id)
+        if str(item.get("SK", "")).startswith("SESSION#")
+    ]
+    items.sort(key=lambda x: x.get("updated_at") or x.get("created_at", ""), reverse=True)
+    return items
 
 
 def list_documents(user_id):
@@ -349,12 +437,13 @@ def list_documents(user_id):
     return docs
 
 
-def upsert_summary_item(user_id, doc_id, summary, testable_concepts):
+def upsert_summary_item(user_id, doc_id, summary, testable_concepts, session_id="default"):
     TABLE.put_item(
         Item={
             "PK": pk_user(user_id),
             "SK": sk_summary(doc_id),
             "doc_id": doc_id,
+            "session_id": session_id or "default",
             "summary": summary,
             "testable_concepts": testable_concepts,
             "generated_at": now_iso(),
@@ -390,6 +479,7 @@ def ensure_document_ready(user_id, doc_id):
         doc_id=doc_id,
         summary=summary_text_for(doc_item.get("title", "uploaded.pdf")),
         testable_concepts=testable_concepts_for(concepts),
+        session_id=updated_doc.get("session_id", "default"),
     )
 
     return updated_doc
@@ -416,9 +506,49 @@ def handle_login(event):
     )
 
 
-def handle_upload(event):
-    title, user_id = parse_upload_body(event)
+def handle_session_create(event):
+    payload = parse_json_body(event)
+    user_id = get_user_id(event, payload)
+    session_id = str(payload.get("session_id") or f"session_{uuid.uuid4().hex[:10]}")
+    session_name = str(payload.get("session_name") or payload.get("name") or "New Session").strip()
     ensure_profile(user_id, f"{user_id}@studybot.com")
+    item = ensure_session(user_id, session_id, session_name)
+    if item.get("session_name") != session_name:
+        item = {**item, "session_name": session_name, "updated_at": now_iso()}
+        TABLE.put_item(Item=item)
+    return response(200, {"session": public_session(item)})
+
+
+def handle_session_list(event):
+    user_id = get_user_id(event)
+    return response(200, {"sessions": [public_session(item) for item in list_sessions(user_id)]})
+
+
+def handle_session_delete(event, session_id):
+    user_id = get_user_id(event)
+    if session_id == "default":
+        return response(400, {"message": "The default session cannot be deleted"})
+
+    items = list_user_items(user_id)
+    doc_ids = {
+        item.get("doc_id")
+        for item in items
+        if doc_id_from_sk(item.get("SK", "")) and doc_in_session(item, session_id)
+    }
+    with TABLE.batch_writer() as batch:
+        batch.delete_item(Key={"PK": pk_user(user_id), "SK": sk_session(session_id)})
+        for item in items:
+            sk = item.get("SK", "")
+            if item.get("session_id") == session_id or item.get("doc_id") in doc_ids:
+                batch.delete_item(Key={"PK": pk_user(user_id), "SK": sk})
+
+    return response(200, {"deleted": True, "session_id": session_id})
+
+
+def handle_upload(event):
+    title, user_id, session_id = parse_upload_body(event)
+    ensure_profile(user_id, f"{user_id}@studybot.com")
+    ensure_session(user_id, session_id)
 
     doc_id = f"doc_{str(now_epoch())[-6:]}"
     uploaded_at = now_iso()
@@ -430,6 +560,7 @@ def handle_upload(event):
         "title": title,
         "s3_key": raw_document_key(user_id, doc_id, title),
         "raw_s3_key": raw_document_key(user_id, doc_id, title),
+        "session_id": session_id,
         "kb_status": "PROCESSING",
         "uploaded_at": uploaded_at,
         "page_count": 40,
@@ -438,7 +569,7 @@ def handle_upload(event):
     }
     TABLE.put_item(Item=doc_item)
 
-    return response(200, {"doc_id": doc_id, "status": "PROCESSING", "kb_status": "PROCESSING"})
+    return response(200, {"doc_id": doc_id, "session_id": session_id, "status": "PROCESSING", "kb_status": "PROCESSING"})
 
 
 def handle_upload_url(event):
@@ -447,12 +578,14 @@ def handle_upload_url(event):
 
     payload = parse_json_body(event)
     user_id = get_user_id(event, payload)
+    session_id = get_session_id(event, payload) or "default"
     filename = safe_filename(payload.get("filename") or payload.get("title") or "uploaded.pdf")
     content_type = payload.get("content_type") or "application/octet-stream"
     doc_id = payload.get("doc_id") or f"doc_{uuid.uuid4().hex[:10]}"
     s3_key = raw_document_key(user_id, doc_id, filename)
 
     ensure_profile(user_id, f"{user_id}@studybot.com")
+    ensure_session(user_id, session_id)
 
     doc_item = {
         "PK": pk_user(user_id),
@@ -461,6 +594,7 @@ def handle_upload_url(event):
         "title": filename,
         "s3_key": s3_key,
         "raw_s3_key": s3_key,
+        "session_id": session_id,
         "kb_status": "UPLOADING",
         "uploaded_at": now_iso(),
         "page_count": 0,
@@ -488,6 +622,7 @@ def handle_upload_url(event):
             "upload_method": "PUT",
             "headers": {"Content-Type": content_type},
             "complete_path": f"/documents/{doc_id}/complete",
+            "session_id": session_id,
         },
     )
 
@@ -495,9 +630,12 @@ def handle_upload_url(event):
 def handle_upload_complete(event, doc_id):
     payload = parse_json_body(event)
     user_id = get_user_id(event, payload)
+    session_id = get_session_id(event, payload) or "default"
     doc_item = get_doc(user_id, doc_id)
     if not doc_item:
         return response(404, {"message": "Document not found"})
+    if not doc_in_session(doc_item, session_id):
+        return response(403, {"message": "Document does not belong to the active session"})
 
     updated = {
         **doc_item,
@@ -532,9 +670,13 @@ def handle_upload_complete(event, doc_id):
 
 def handle_documents_list(event):
     user_id = get_user_id(event)
+    session_id = get_session_id(event) or "default"
+    ensure_session(user_id, session_id)
 
     docs = []
     for doc in list_documents(user_id):
+        if not doc_in_session(doc, session_id):
+            continue
         ensured = ensure_document_ready(user_id, doc.get("doc_id"))
         if ensured:
             docs.append(ensured)
@@ -548,6 +690,7 @@ def handle_documents_list(event):
             "status": "COMPLETE" if item.get("kb_status") == "READY" else item.get("kb_status", "PROCESSING"),
             "kb_status": item.get("kb_status", "PROCESSING"),
             "s3_key": item.get("s3_key", ""),
+            "session_id": item.get("session_id", "default"),
         }
         for item in docs
     ]
@@ -557,10 +700,13 @@ def handle_documents_list(event):
 
 def handle_document_detail(event, doc_id):
     user_id = get_user_id(event)
+    session_id = get_session_id(event) or "default"
 
     doc_item = ensure_document_ready(user_id, doc_id)
     if not doc_item:
         return response(404, {"message": "Document not found"})
+    if not doc_in_session(doc_item, session_id):
+        return response(403, {"message": "Document does not belong to the active session"})
 
     summary_item = get_summary(user_id, doc_id)
 
@@ -580,10 +726,13 @@ def handle_document_detail(event, doc_id):
 
 def handle_document_status(event, doc_id):
     user_id = get_user_id(event)
+    session_id = get_session_id(event) or "default"
 
     doc_item = ensure_document_ready(user_id, doc_id)
     if not doc_item:
         return response(404, {"message": "Document not found"})
+    if not doc_in_session(doc_item, session_id):
+        return response(403, {"message": "Document does not belong to the active session"})
 
     status = doc_item.get("kb_status", "PROCESSING")
     normalized = "COMPLETE" if status == "READY" else status
@@ -629,22 +778,47 @@ def normalize_quiz_count(value):
         return 5
 
 
+def get_selected_docs_for_session(user_id, selected_doc_ids, session_id):
+    selected_docs = []
+    forbidden_doc_ids = []
+    missing_doc_ids = []
+
+    for doc_id in selected_doc_ids:
+        doc_item = ensure_document_ready(user_id, doc_id)
+        if not doc_item:
+            missing_doc_ids.append(doc_id)
+            continue
+        if not doc_in_session(doc_item, session_id):
+            forbidden_doc_ids.append(doc_id)
+            continue
+        selected_docs.append(doc_item)
+
+    if forbidden_doc_ids:
+        return None, response(
+            403,
+            {
+                "message": "Selected documents must belong to the active session",
+                "forbidden_doc_ids": forbidden_doc_ids,
+            },
+        )
+    if not selected_docs:
+        return None, response(404, {"message": "No selected documents were found", "missing_doc_ids": missing_doc_ids})
+    return selected_docs, None
+
+
 def handle_ask(event):
     payload = parse_json_body(event)
-    user_id = payload.get("user_id") or DEMO_USER_ID
+    user_id = get_user_id(event, payload)
+    session_id = get_session_id(event, payload) or "default"
     selected_doc_ids = normalize_doc_ids(payload)
     question = (payload.get("question") or "").strip()
 
     if not selected_doc_ids or not question:
         return response(400, {"message": "selected_doc_ids (or doc_id) and question are required"})
 
-    selected_docs = []
-    for doc_id in selected_doc_ids:
-        doc_item = ensure_document_ready(user_id, doc_id)
-        if doc_item:
-            selected_docs.append(doc_item)
-    if not selected_docs:
-        return response(404, {"message": "No selected documents were found"})
+    selected_docs, error_response = get_selected_docs_for_session(user_id, selected_doc_ids, session_id)
+    if error_response:
+        return error_response
 
     # Keep first selected doc as primary for history compatibility.
     primary_doc = selected_docs[0]
@@ -679,6 +853,7 @@ def handle_ask(event):
             "PK": pk_user(user_id),
             "SK": sk_question(created_at),
             "doc_id": doc_id,
+            "session_id": session_id,
             "selected_doc_ids": [item.get("doc_id") for item in selected_docs if item.get("doc_id")],
             "question": question,
             "answer": answer,
@@ -692,6 +867,7 @@ def handle_ask(event):
         200,
         {
             "doc_id": doc_id,
+            "session_id": session_id,
             "selected_doc_ids": [item.get("doc_id") for item in selected_docs if item.get("doc_id")],
             "question": question,
             "answer": answer,
@@ -704,18 +880,14 @@ def handle_ask(event):
 def handle_summary(event):
     payload = parse_json_body(event)
     user_id = payload.get("user_id") or get_user_id(event, payload)
+    session_id = get_session_id(event, payload) or "default"
     selected_doc_ids = normalize_doc_ids(payload)
     if not selected_doc_ids:
         return response(400, {"message": "selected_doc_ids (or doc_id) is required"})
 
-    selected_docs = []
-    for doc_id in selected_doc_ids:
-        doc_item = ensure_document_ready(user_id, doc_id)
-        if doc_item:
-            selected_docs.append(doc_item)
-
-    if not selected_docs:
-        return response(404, {"message": "No selected documents were found"})
+    selected_docs, error_response = get_selected_docs_for_session(user_id, selected_doc_ids, session_id)
+    if error_response:
+        return error_response
 
     primary_doc = selected_docs[0]
     fallback_summary_item = get_summary(user_id, primary_doc.get("doc_id"))
@@ -748,10 +920,19 @@ def handle_summary(event):
         except Exception:
             pass
 
+    upsert_summary_item(
+        user_id=user_id,
+        doc_id=primary_doc.get("doc_id"),
+        summary=summary_text,
+        testable_concepts=testable_concepts[:5],
+        session_id=session_id,
+    )
+
     return response(
         200,
         {
             "doc_id": primary_doc.get("doc_id"),
+            "session_id": session_id,
             "selected_doc_ids": [item.get("doc_id") for item in selected_docs if item.get("doc_id")],
             "summary": summary_text,
             "testable_concepts": testable_concepts[:5],
@@ -762,6 +943,7 @@ def handle_summary(event):
 def handle_quiz(event):
     payload = parse_json_body(event)
     user_id = payload.get("user_id") or get_user_id(event, payload)
+    session_id = get_session_id(event, payload) or "default"
     selected_doc_ids = normalize_doc_ids(payload)
     difficulty = str(payload.get("difficulty") or "medium").lower()
     requested_count = payload.get("count", 5)
@@ -769,14 +951,9 @@ def handle_quiz(event):
     if not selected_doc_ids:
         return response(400, {"message": "selected_doc_ids (or doc_id) is required"})
 
-    selected_docs = []
-    for doc_id in selected_doc_ids:
-        doc_item = ensure_document_ready(user_id, doc_id)
-        if doc_item:
-            selected_docs.append(doc_item)
-
-    if not selected_docs:
-        return response(404, {"message": "No selected documents were found"})
+    selected_docs, error_response = get_selected_docs_for_session(user_id, selected_doc_ids, session_id)
+    if error_response:
+        return error_response
 
     primary_doc = selected_docs[0]
     doc_id = primary_doc.get("doc_id")
@@ -813,6 +990,7 @@ def handle_quiz(event):
         "PK": pk_user(user_id),
         "SK": sk_quiz(doc_id),
         "doc_id": doc_id,
+        "session_id": session_id,
         "selected_doc_ids": [item.get("doc_id") for item in selected_docs if item.get("doc_id")],
         "questions": questions,
         "generated_at": now_iso(),
@@ -823,6 +1001,7 @@ def handle_quiz(event):
         200,
         {
             "doc_id": doc_id,
+            "session_id": session_id,
             "selected_doc_ids": [item.get("doc_id") for item in selected_docs if item.get("doc_id")],
             "questions": questions,
         },
@@ -864,6 +1043,10 @@ def route_request(event):
 
     if method == "POST" and path == "/login":
         return handle_login(event)
+    if method == "POST" and path == "/session/create":
+        return handle_session_create(event)
+    if method == "GET" and path == "/session/list":
+        return handle_session_list(event)
     if method == "POST" and path == "/documents/upload-url":
         return handle_upload_url(event)
     if method == "POST" and path == "/upload/presign":
@@ -882,6 +1065,10 @@ def route_request(event):
         return handle_quiz(event)
     if method == "GET" and path == "/dashboard":
         return handle_dashboard(event)
+
+    session_delete_match = re.match(r"^/session/([^/]+)$", path)
+    if method == "DELETE" and session_delete_match:
+        return handle_session_delete(event, session_delete_match.group(1))
 
     detail_match = re.match(r"^/documents/([^/]+)$", path)
     if method == "GET" and detail_match:

@@ -100,6 +100,45 @@ class StudyBotInfraStack(Stack):
             },
         )
 
+        ai_lambda_environment = {
+            "DOCUMENTS_TABLE": documents_table.table_name,
+            "INGESTION_MODE": "bedrock",
+            "BEDROCK_KNOWLEDGE_BASE_ID": knowledge_base_id,
+            "BEDROCK_DATA_SOURCE_ID": data_source_id,
+            "BEDROCK_GENERATION_MODEL_ID": generation_model_id,
+            "VECTOR_INDEX_ARN": vector_index_arn,
+        }
+        qa_lambda = lambda_.Function(
+            self,
+            "StudyBotQaLambda",
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            handler="qa_lambda.lambda_handler",
+            code=backend_lambda_code,
+            timeout=Duration.seconds(60),
+            memory_size=512,
+            environment=ai_lambda_environment,
+        )
+        summary_lambda = lambda_.Function(
+            self,
+            "StudyBotSummaryLambda",
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            handler="summary_lambda.lambda_handler",
+            code=backend_lambda_code,
+            timeout=Duration.seconds(60),
+            memory_size=512,
+            environment=ai_lambda_environment,
+        )
+        quiz_lambda = lambda_.Function(
+            self,
+            "StudyBotQuizLambda",
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            handler="quiz_lambda.lambda_handler",
+            code=backend_lambda_code,
+            timeout=Duration.seconds(60),
+            memory_size=512,
+            environment=ai_lambda_environment,
+        )
+
         process_pdf_lambda = lambda_.Function(
             self,
             "ProcessPdfLambda",
@@ -119,6 +158,9 @@ class StudyBotInfraStack(Stack):
         )
 
         documents_table.grant_read_write_data(api_lambda)
+        documents_table.grant_read_write_data(qa_lambda)
+        documents_table.grant_read_write_data(summary_lambda)
+        documents_table.grant_read_write_data(quiz_lambda)
         documents_table.grant_read_write_data(process_pdf_lambda)
         uploads_bucket.grant_put(api_lambda)
         uploads_bucket.grant_read_write(process_pdf_lambda)
@@ -128,17 +170,23 @@ class StudyBotInfraStack(Stack):
                 actions=[
                     "bedrock:StartIngestionJob",
                     "bedrock:GetIngestionJob",
-                    "bedrock:Retrieve",
                 ],
                 resources=[kb_arn, data_source_arn],
             )
         )
-        api_lambda.add_to_role_policy(
-            iam.PolicyStatement(
-                actions=["bedrock:InvokeModel"],
-                resources=[generation_model_arn, generation_profile_arn],
+        for ai_lambda in [qa_lambda, summary_lambda, quiz_lambda]:
+            ai_lambda.add_to_role_policy(
+                iam.PolicyStatement(
+                    actions=["bedrock:Retrieve"],
+                    resources=[kb_arn],
+                )
             )
-        )
+            ai_lambda.add_to_role_policy(
+                iam.PolicyStatement(
+                    actions=["bedrock:InvokeModel"],
+                    resources=[generation_model_arn, generation_profile_arn],
+                )
+            )
         process_pdf_lambda.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["bedrock:StartIngestionJob", "bedrock:GetIngestionJob"],
@@ -168,10 +216,11 @@ class StudyBotInfraStack(Stack):
             api_name="studybot-api",
             cors_preflight=apigatewayv2.CorsPreflightOptions(
                 allow_origins=["*"],
-                allow_headers=["Content-Type", "Authorization", "X-User-Id"],
+                allow_headers=["Content-Type", "Authorization", "X-User-Id", "X-Session-Id"],
                 allow_methods=[
                     apigatewayv2.CorsHttpMethod.GET,
                     apigatewayv2.CorsHttpMethod.POST,
+                    apigatewayv2.CorsHttpMethod.DELETE,
                     apigatewayv2.CorsHttpMethod.OPTIONS,
                 ],
             ),
@@ -179,6 +228,33 @@ class StudyBotInfraStack(Stack):
         api_integration = apigatewayv2_integrations.HttpLambdaIntegration(
             "StudyBotApiLambdaIntegration",
             api_lambda,
+        )
+        qa_integration = apigatewayv2_integrations.HttpLambdaIntegration(
+            "StudyBotQaLambdaIntegration",
+            qa_lambda,
+        )
+        summary_integration = apigatewayv2_integrations.HttpLambdaIntegration(
+            "StudyBotSummaryLambdaIntegration",
+            summary_lambda,
+        )
+        quiz_integration = apigatewayv2_integrations.HttpLambdaIntegration(
+            "StudyBotQuizLambdaIntegration",
+            quiz_lambda,
+        )
+        http_api.add_routes(
+            path="/ask",
+            methods=[apigatewayv2.HttpMethod.POST],
+            integration=qa_integration,
+        )
+        http_api.add_routes(
+            path="/summary",
+            methods=[apigatewayv2.HttpMethod.POST],
+            integration=summary_integration,
+        )
+        http_api.add_routes(
+            path="/quiz",
+            methods=[apigatewayv2.HttpMethod.POST],
+            integration=quiz_integration,
         )
         http_api.add_routes(
             path="/{proxy+}",
@@ -199,3 +275,6 @@ class StudyBotInfraStack(Stack):
         CfnOutput(self, "HttpApiUrl", value=http_api.api_endpoint)
         CfnOutput(self, "ApiLambdaName", value=api_lambda.function_name)
         CfnOutput(self, "ProcessPdfLambdaName", value=process_pdf_lambda.function_name)
+        CfnOutput(self, "QaLambdaName", value=qa_lambda.function_name)
+        CfnOutput(self, "SummaryLambdaName", value=summary_lambda.function_name)
+        CfnOutput(self, "QuizLambdaName", value=quiz_lambda.function_name)
