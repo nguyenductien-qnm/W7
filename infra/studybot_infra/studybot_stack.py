@@ -1,5 +1,7 @@
 from aws_cdk import (
+    CfnResource,
     CfnOutput,
+    CfnParameter,
     Duration,
     Stack,
 )
@@ -42,6 +44,20 @@ class StudyBotInfraStack(Stack):
         generation_model_arn = (
             "arn:aws:bedrock:ap-southeast-1:589077667575:"
             f"inference-profile/{generation_model_id}"
+        )
+        agentcore_memory_id = CfnParameter(
+            self,
+            "AgentCoreMemoryId",
+            type="String",
+            default="",
+            description="Optional Bedrock AgentCore Memory id for conversation memory.",
+        )
+        agentcore_memory_strategy_id = CfnParameter(
+            self,
+            "AgentCoreMemoryStrategyId",
+            type="String",
+            default="",
+            description="Optional Bedrock AgentCore Memory strategy id for retrieval.",
         )
 
         uploads_bucket = s3.Bucket.from_bucket_name(
@@ -107,6 +123,9 @@ class StudyBotInfraStack(Stack):
             "BEDROCK_DATA_SOURCE_ID": data_source_id,
             "BEDROCK_GENERATION_MODEL_ID": generation_model_id,
             "VECTOR_INDEX_ARN": vector_index_arn,
+            "UPLOADS_BUCKET_NAME": uploads_bucket_name,
+            "AGENTCORE_MEMORY_ID": agentcore_memory_id.value_as_string,
+            "AGENTCORE_MEMORY_STRATEGY_ID": agentcore_memory_strategy_id.value_as_string,
         }
         qa_lambda = lambda_.Function(
             self,
@@ -138,6 +157,16 @@ class StudyBotInfraStack(Stack):
             memory_size=512,
             environment=ai_lambda_environment,
         )
+        planner_lambda = lambda_.Function(
+            self,
+            "StudyBotPlannerLambda",
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            handler="planner_lambda.lambda_handler",
+            code=backend_lambda_code,
+            timeout=Duration.seconds(60),
+            memory_size=512,
+            environment=ai_lambda_environment,
+        )
         history_lambda = lambda_.Function(
             self,
             "StudyBotHistoryLambda",
@@ -162,7 +191,7 @@ class StudyBotInfraStack(Stack):
                 "UPLOADS_BUCKET_NAME": uploads_bucket_name,
                 "BEDROCK_KNOWLEDGE_BASE_ID": knowledge_base_id,
                 "BEDROCK_DATA_SOURCE_ID": data_source_id,
-                "KB_PROCESSED_PREFIX": "documents/processed",
+                "KB_PROCESSED_PREFIX": "processed",
                 "USE_TEXTRACT_FALLBACK": "true",
             },
         )
@@ -171,9 +200,11 @@ class StudyBotInfraStack(Stack):
         documents_table.grant_read_write_data(qa_lambda)
         documents_table.grant_read_write_data(summary_lambda)
         documents_table.grant_read_write_data(quiz_lambda)
+        documents_table.grant_read_write_data(planner_lambda)
         documents_table.grant_read_data(history_lambda)
         documents_table.grant_read_write_data(process_pdf_lambda)
         uploads_bucket.grant_put(api_lambda)
+        uploads_bucket.grant_read(summary_lambda)
         uploads_bucket.grant_read_write(process_pdf_lambda)
 
         api_lambda.add_to_role_policy(
@@ -185,7 +216,7 @@ class StudyBotInfraStack(Stack):
                 resources=[kb_arn, data_source_arn],
             )
         )
-        for ai_lambda in [qa_lambda, summary_lambda, quiz_lambda]:
+        for ai_lambda in [qa_lambda, summary_lambda, quiz_lambda, planner_lambda]:
             ai_lambda.add_to_role_policy(
                 iam.PolicyStatement(
                     actions=["bedrock:Retrieve"],
@@ -198,9 +229,23 @@ class StudyBotInfraStack(Stack):
                     resources=[generation_model_arn, generation_profile_arn],
                 )
             )
+        for memory_lambda in [qa_lambda, planner_lambda]:
+            memory_lambda.add_to_role_policy(
+                iam.PolicyStatement(
+                    actions=[
+                        "bedrock-agentcore:CreateEvent",
+                        "bedrock-agentcore:RetrieveMemoryRecords",
+                    ],
+                    resources=["*"],
+                )
+            )
         process_pdf_lambda.add_to_role_policy(
             iam.PolicyStatement(
-                actions=["bedrock:StartIngestionJob", "bedrock:GetIngestionJob"],
+                actions=[
+                    "bedrock:StartIngestionJob",
+                    "bedrock:GetIngestionJob",
+                    "bedrock:ListIngestionJobs",
+                ],
                 resources=[kb_arn, data_source_arn],
             )
         )
@@ -215,6 +260,11 @@ class StudyBotInfraStack(Stack):
         )
 
         for suffix in [".pdf", ".docx", ".md", ".markdown", ".txt", ".pptx", ".vtt"]:
+            uploads_bucket.add_event_notification(
+                s3.EventType.OBJECT_CREATED,
+                s3n.LambdaDestination(process_pdf_lambda),
+                s3.NotificationKeyFilter(prefix="raw/", suffix=suffix),
+            )
             uploads_bucket.add_event_notification(
                 s3.EventType.OBJECT_CREATED,
                 s3n.LambdaDestination(process_pdf_lambda),
@@ -252,6 +302,10 @@ class StudyBotInfraStack(Stack):
             "StudyBotQuizLambdaIntegration",
             quiz_lambda,
         )
+        planner_integration = apigatewayv2_integrations.HttpLambdaIntegration(
+            "StudyBotPlannerLambdaIntegration",
+            planner_lambda,
+        )
         history_integration = apigatewayv2_integrations.HttpLambdaIntegration(
             "StudyBotHistoryLambdaIntegration",
             history_lambda,
@@ -272,9 +326,166 @@ class StudyBotInfraStack(Stack):
             integration=quiz_integration,
         )
         http_api.add_routes(
+            path="/planner",
+            methods=[apigatewayv2.HttpMethod.GET, apigatewayv2.HttpMethod.POST],
+            integration=planner_integration,
+        )
+        http_api.add_routes(
+            path="/planner/{plan_id}",
+            methods=[apigatewayv2.HttpMethod.GET, apigatewayv2.HttpMethod.DELETE],
+            integration=planner_integration,
+        )
+        http_api.add_routes(
+            path="/planner/{plan_id}/recommend-docs",
+            methods=[apigatewayv2.HttpMethod.POST],
+            integration=planner_integration,
+        )
+        http_api.add_routes(
             path="/history",
             methods=[apigatewayv2.HttpMethod.GET],
             integration=history_integration,
+        )
+
+        gateway_role = iam.Role(
+            self,
+            "StudyBotAgentCoreGatewayRole",
+            assumed_by=iam.ServicePrincipal("bedrock-agentcore.amazonaws.com"),
+        )
+        for target_lambda in [api_lambda, qa_lambda, summary_lambda, quiz_lambda, planner_lambda, history_lambda]:
+            target_lambda.grant_invoke(gateway_role)
+            target_lambda.add_permission(
+                f"AgentCoreInvoke{target_lambda.node.id}",
+                principal=iam.ServicePrincipal("bedrock-agentcore.amazonaws.com"),
+                action="lambda:InvokeFunction",
+            )
+
+        agentcore_gateway = CfnResource(
+            self,
+            "StudyBotAgentCoreGateway",
+            type="AWS::BedrockAgentCore::Gateway",
+            properties={
+                "Name": "studybot-tools",
+                "Description": "Server-side StudyBot tools for document study workflows.",
+                "AuthorizerType": "AWS_IAM",
+                "ProtocolType": "MCP",
+                "RoleArn": gateway_role.role_arn,
+            },
+        )
+
+        def string_schema(description):
+            return {"Type": "string", "Description": description}
+
+        def array_string_schema(description):
+            return {"Type": "array", "Description": description, "Items": {"Type": "string"}}
+
+        tool_input_schema = {
+            "Type": "object",
+            "Required": ["user_id", "session_id"],
+            "Properties": {
+                "user_id": string_schema("Application user id."),
+                "session_id": string_schema("Active study session id."),
+                "selected_doc_ids": array_string_schema("Selected document ids."),
+                "plan_id": string_schema("Saved exam plan id."),
+                "question": string_schema("User question or prompt."),
+                "exam_date": string_schema("Exam date in YYYY-MM-DD format."),
+                "daily_study_hours": {"Type": "number", "Description": "Available study hours per day."},
+                "weekly_study_hours": {"Type": "number", "Description": "Available study hours per week."},
+                "weak_topics": array_string_schema("Known weak topics."),
+                "excluded_days": array_string_schema("Dates or weekdays to skip."),
+                "preferred_session_length": {"Type": "integer", "Description": "Preferred session length in minutes."},
+            },
+        }
+        tool_output_schema = {
+            "Type": "object",
+            "Properties": {
+                "tool_name": string_schema("Tool name."),
+                "status": string_schema("success or error."),
+                "data": {"Type": "object", "Description": "Tool result data."},
+                "citations": {"Type": "array", "Description": "Grounding citations.", "Items": {"Type": "object"}},
+                "errors": {"Type": "array", "Description": "Error messages.", "Items": {"Type": "string"}},
+            },
+        }
+
+        def add_agentcore_lambda_target(logical_id, name, description, fn, tools):
+            return CfnResource(
+                self,
+                logical_id,
+                type="AWS::BedrockAgentCore::GatewayTarget",
+                properties={
+                    "Name": name,
+                    "Description": description,
+                    "GatewayIdentifier": agentcore_gateway.ref,
+                    "CredentialProviderConfigurations": [
+                        {"CredentialProviderType": "GATEWAY_IAM_ROLE"}
+                    ],
+                    "TargetConfiguration": {
+                        "Mcp": {
+                            "Lambda": {
+                                "LambdaArn": fn.function_arn,
+                                "ToolSchema": {
+                                    "InlinePayload": [
+                                        {
+                                            "Name": tool_name,
+                                            "Description": tool_description,
+                                            "InputSchema": tool_input_schema,
+                                            "OutputSchema": tool_output_schema,
+                                        }
+                                        for tool_name, tool_description in tools
+                                    ]
+                                },
+                            }
+                        }
+                    },
+                },
+            )
+
+        add_agentcore_lambda_target(
+            "StudyBotAppToolsTarget",
+            "studybot-app-tools",
+            "Document listing tools.",
+            api_lambda,
+            [("list_documents", "List documents in the active study session.")],
+        )
+        add_agentcore_lambda_target(
+            "StudyBotQaToolsTarget",
+            "studybot-qa-tools",
+            "Question answering tools.",
+            qa_lambda,
+            [("ask_documents", "Answer questions from selected documents.")],
+        )
+        add_agentcore_lambda_target(
+            "StudyBotSummaryToolsTarget",
+            "studybot-summary-tools",
+            "Document summary tools.",
+            summary_lambda,
+            [("summarize_documents", "Summarize selected documents.")],
+        )
+        add_agentcore_lambda_target(
+            "StudyBotQuizToolsTarget",
+            "studybot-quiz-tools",
+            "Quiz and flashcard generation tools.",
+            quiz_lambda,
+            [
+                ("generate_quiz", "Generate quiz questions from selected documents."),
+                ("generate_flashcards", "Generate flashcards from selected documents."),
+            ],
+        )
+        add_agentcore_lambda_target(
+            "StudyBotPlannerToolsTarget",
+            "studybot-planner-tools",
+            "Exam planning tools.",
+            planner_lambda,
+            [
+                ("create_exam_plan", "Create a dated study plan before an exam."),
+                ("recommend_exam_plan_documents", "Recommend ready session documents relevant to a saved exam plan."),
+            ],
+        )
+        add_agentcore_lambda_target(
+            "StudyBotHistoryToolsTarget",
+            "studybot-history-tools",
+            "Session history tools.",
+            history_lambda,
+            [("get_history", "Get UI history for the active study session.")],
         )
         http_api.add_routes(
             path="/{proxy+}",
@@ -298,4 +509,7 @@ class StudyBotInfraStack(Stack):
         CfnOutput(self, "QaLambdaName", value=qa_lambda.function_name)
         CfnOutput(self, "SummaryLambdaName", value=summary_lambda.function_name)
         CfnOutput(self, "QuizLambdaName", value=quiz_lambda.function_name)
+        CfnOutput(self, "PlannerLambdaName", value=planner_lambda.function_name)
         CfnOutput(self, "HistoryLambdaName", value=history_lambda.function_name)
+        CfnOutput(self, "AgentCoreGatewayId", value=agentcore_gateway.ref)
+        CfnOutput(self, "AgentCoreGatewayUrl", value=agentcore_gateway.get_att("GatewayUrl").to_string())

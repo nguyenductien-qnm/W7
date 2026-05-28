@@ -1,6 +1,7 @@
 from app import (
     BEDROCK_KNOWLEDGE_BASE_ID,
     TABLE,
+    UPLOADS_BUCKET_NAME,
     get_selected_docs_for_session,
     get_session_id,
     get_user_id,
@@ -14,7 +15,47 @@ from app import (
     summary_text_for,
     testable_concepts_for,
 )
-from summary_kb import summarize_knowledge_base
+import boto3
+from botocore.exceptions import ClientError
+
+from summary_kb import summarize_knowledge_base, summarize_processed_texts
+from tool_contract import run_tool_handler
+
+
+S3 = boto3.client("s3")
+
+
+def _processed_key_candidates(doc):
+    keys = []
+    for field in ("processed_text_s3_key", "processed_s3_key", "processed_s3_prefix"):
+        value = str(doc.get(field) or "").strip()
+        if value and value.endswith(".txt") and value not in keys:
+            keys.append(value)
+    user_id = str(doc.get("PK") or "").replace("USER#", "")
+    session_id = str(doc.get("session_id") or "default")
+    doc_id = doc.get("doc_id")
+    for key in (
+        f"processed/{user_id}/{session_id}/{doc_id}.txt",
+        f"documents/processed/{user_id}/{doc_id}.txt",
+    ):
+        if user_id and doc_id and key not in keys:
+            keys.append(key)
+    return keys
+
+
+def _read_processed_text(doc):
+    bucket = UPLOADS_BUCKET_NAME
+    if not bucket:
+        return ""
+    for key in _processed_key_candidates(doc):
+        try:
+            obj = S3.get_object(Bucket=bucket, Key=key)
+            return obj["Body"].read().decode("utf-8", errors="replace").strip()
+        except ClientError:
+            continue
+        except Exception:
+            continue
+    return ""
 
 
 def handle_summary(event):
@@ -43,7 +84,27 @@ def handle_summary(event):
     summary_text = fallback_summary_text
     testable_concepts = fallback_concepts
 
-    if BEDROCK_KNOWLEDGE_BASE_ID:
+    processed_texts = []
+    for doc in selected_docs:
+        text = _read_processed_text(doc)
+        if text:
+            processed_texts.append(
+                {
+                    "doc_id": doc.get("doc_id"),
+                    "title": doc.get("title", "uploaded.pdf"),
+                    "text": text,
+                }
+            )
+
+    if processed_texts:
+        try:
+            s3_summary = summarize_processed_texts(processed_texts, fallback_concepts)
+            summary_text = s3_summary.get("summary") or summary_text
+            testable_concepts = s3_summary.get("testable_concepts") or testable_concepts
+        except Exception:
+            pass
+
+    if not processed_texts and BEDROCK_KNOWLEDGE_BASE_ID:
         try:
             kb_summary = summarize_knowledge_base(
                 question="Create a concise study summary and identify testable concepts.",
@@ -89,6 +150,6 @@ def handle_summary(event):
     )
 def lambda_handler(event, _context):
     try:
-        return handle_summary(event)
+        return run_tool_handler(event, "summarize_documents", handle_summary)
     except Exception as exc:
         return response(500, {"message": "Internal server error", "error": str(exc)})

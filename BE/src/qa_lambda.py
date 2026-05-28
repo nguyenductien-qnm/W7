@@ -12,6 +12,8 @@ from app import (
     sk_question,
 )
 from qa_kb import ask_knowledge_base
+from memory_utils import create_memory_event, retrieve_memory_texts
+from tool_contract import run_tool_handler
 
 
 def handle_ask(event):
@@ -40,8 +42,12 @@ def handle_ask(event):
     citations = []
 
     if BEDROCK_KNOWLEDGE_BASE_ID:
+        memory_texts = retrieve_memory_texts(user_id, session_id, question, top_k=3)
+        kb_question = question
+        if memory_texts:
+            kb_question = "Relevant memory:\n" + "\n".join(memory_texts) + f"\n\nQuestion: {question}"
         kb_result = ask_knowledge_base(
-            question=question,
+            question=kb_question,
             knowledge_base_id=BEDROCK_KNOWLEDGE_BASE_ID,
             doc_title=primary_doc.get("title", "uploaded.pdf"),
             allowed_doc_ids=[item.get("doc_id") for item in selected_docs if item.get("doc_id")],
@@ -69,6 +75,8 @@ def handle_ask(event):
             "created_at": created_at,
         }
     )
+    create_memory_event(user_id, session_id, "USER", question, {"feature": "chat"})
+    create_memory_event(user_id, session_id, "ASSISTANT", answer, {"feature": "chat"})
 
     return response(
         200,
@@ -86,6 +94,6 @@ def handle_ask(event):
 
 def lambda_handler(event, _context):
     try:
-        return handle_ask(event)
+        return run_tool_handler(event, "ask_documents", handle_ask)
     except Exception as exc:
         return response(500, {"message": "Internal server error", "error": str(exc)})

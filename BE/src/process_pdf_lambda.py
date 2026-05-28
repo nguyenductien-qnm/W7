@@ -11,6 +11,7 @@ from urllib.parse import unquote_plus
 from xml.etree import ElementTree as ET
 
 import boto3
+from botocore.exceptions import ClientError
 
 try:
     import pdfplumber
@@ -38,7 +39,7 @@ DOCUMENTS_TABLE = os.environ.get("DOCUMENTS_TABLE", "StudyBotDocuments")
 UPLOADS_BUCKET_NAME = os.environ.get("UPLOADS_BUCKET_NAME", "")
 BEDROCK_KNOWLEDGE_BASE_ID = os.environ.get("BEDROCK_KNOWLEDGE_BASE_ID", "")
 BEDROCK_DATA_SOURCE_ID = os.environ.get("BEDROCK_DATA_SOURCE_ID", "")
-KB_PROCESSED_PREFIX = os.environ.get("KB_PROCESSED_PREFIX", "documents/processed")
+KB_PROCESSED_PREFIX = os.environ.get("KB_PROCESSED_PREFIX", "processed")
 USE_TEXTRACT_FALLBACK = os.environ.get("USE_TEXTRACT_FALLBACK", "true").lower() == "true"
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".md", ".markdown", ".txt", ".pptx", ".vtt"}
 
@@ -54,11 +55,17 @@ def now_iso():
 
 
 def parse_object_key(key):
-    # Expected upload key: documents/raw/{user_id}/{doc_id}/{filename}
+    # New upload key: raw/{user_id}/{session_id}/{doc_id}/{filename}
+    match = re.match(r"^raw/(?P<user_id>[^/]+)/(?P<session_id>[^/]+)/(?P<doc_id>[^/]+)/(?P<filename>.+)$", key)
+    if match:
+        return match.groupdict()
+    # Legacy upload key: documents/raw/{user_id}/{doc_id}/{filename}
     match = re.match(r"^documents/raw/(?P<user_id>[^/]+)/(?P<doc_id>[^/]+)/(?P<filename>.+)$", key)
-    if not match:
-        return None
-    return match.groupdict()
+    if match:
+        parsed = match.groupdict()
+        parsed["session_id"] = ""
+        return parsed
+    return None
 
 
 def update_doc(user_id, doc_id, **attrs):
@@ -443,33 +450,39 @@ def extract_with_textract(bucket, key):
     return {"text": "\n".join(lines).strip(), "job_id": job_id}
 
 
-def delete_processed_objects(bucket, user_id, doc_id):
+def delete_processed_objects(bucket, user_id, session_id, doc_id):
     processed_root = KB_PROCESSED_PREFIX.rstrip("/")
-    legacy_key = f"{processed_root}/{user_id}/{doc_id}.txt"
-    chunk_prefix = f"{processed_root}/{user_id}/{doc_id}/"
-    keys = [legacy_key]
+    keys = [
+        f"{processed_root}/{user_id}/{session_id}/{doc_id}.txt",
+        f"documents/processed/{user_id}/{doc_id}.txt",
+    ]
+    chunk_prefixes = [
+        f"{processed_root}/{user_id}/{session_id}/{doc_id}/",
+        f"documents/processed/{user_id}/{doc_id}/",
+    ]
 
-    token = None
-    while True:
-        kwargs = {"Bucket": bucket, "Prefix": chunk_prefix}
-        if token:
-            kwargs["ContinuationToken"] = token
-        response_data = s3.list_objects_v2(**kwargs)
-        keys.extend([item["Key"] for item in response_data.get("Contents", [])])
-        token = response_data.get("NextContinuationToken")
-        if not token:
-            break
+    for chunk_prefix in chunk_prefixes:
+        token = None
+        while True:
+            kwargs = {"Bucket": bucket, "Prefix": chunk_prefix}
+            if token:
+                kwargs["ContinuationToken"] = token
+            response_data = s3.list_objects_v2(**kwargs)
+            keys.extend([item["Key"] for item in response_data.get("Contents", [])])
+            token = response_data.get("NextContinuationToken")
+            if not token:
+                break
 
     for index in range(0, len(keys), 1000):
-        batch = keys[index:index + 1000]
+        batch = list(dict.fromkeys(keys[index:index + 1000]))
         if batch:
             s3.delete_objects(Bucket=bucket, Delete={"Objects": [{"Key": key} for key in batch], "Quiet": True})
 
 
-def upload_processed_text(bucket, user_id, doc_id, text):
+def upload_processed_text(bucket, user_id, session_id, doc_id, text):
     processed_root = KB_PROCESSED_PREFIX.rstrip("/")
-    processed_key = f"{processed_root}/{user_id}/{doc_id}.txt"
-    delete_processed_objects(bucket, user_id, doc_id)
+    processed_key = f"{processed_root}/{user_id}/{session_id or 'default'}/{doc_id}.txt"
+    delete_processed_objects(bucket, user_id, session_id or "default", doc_id)
 
     s3.put_object(
         Bucket=bucket,
@@ -497,6 +510,38 @@ def start_kb_ingestion():
     return response_data.get("ingestionJob", {})
 
 
+def latest_active_ingestion_job():
+    response_data = bedrock_agent.list_ingestion_jobs(
+        knowledgeBaseId=BEDROCK_KNOWLEDGE_BASE_ID,
+        dataSourceId=BEDROCK_DATA_SOURCE_ID,
+    )
+    jobs = response_data.get("ingestionJobSummaries", [])
+    def job_timestamp(job):
+        value = job.get("updatedAt") or job.get("startedAt") or ""
+        return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+    active_jobs = [
+        job for job in jobs
+        if str(job.get("status", "")).upper() in {"STARTING", "IN_PROGRESS"}
+    ]
+    if active_jobs:
+        return sorted(active_jobs, key=job_timestamp, reverse=True)[0]
+    if jobs:
+        return sorted(jobs, key=job_timestamp, reverse=True)[0]
+    return {}
+
+
+def is_ingestion_already_running_error(exc):
+    if not isinstance(exc, ClientError):
+        return False
+    error = exc.response.get("Error", {})
+    code = str(error.get("Code", ""))
+    message = str(error.get("Message", "")).lower()
+    if code in {"ConflictException", "Conflict"}:
+        return True
+    return "ingestion" in message and any(term in message for term in ["in progress", "running", "concurrent", "active"])
+
+
 def process_record(record):
     detail = record.get("detail") or {}
     bucket = (detail.get("bucket") or {}).get("name")
@@ -516,6 +561,7 @@ def process_record(record):
 
     user_id = parsed["user_id"]
     doc_id = parsed["doc_id"]
+    session_id = parsed.get("session_id") or "default"
     filename = parsed["filename"]
 
     update_doc(
@@ -525,6 +571,7 @@ def process_record(record):
         processing_started_at=now_iso(),
         title=filename,
         raw_s3_key=key,
+        session_id=session_id,
     )
 
     extension = PurePosixPath(filename).suffix.lower()
@@ -549,7 +596,7 @@ def process_record(record):
         update_doc(user_id, doc_id, kb_status="FAILED", failure_reason=reason, processed_at=now_iso())
         return {"doc_id": doc_id, "status": "FAILED", "reason": reason, "file_type": extraction.get("file_type", extension or "unknown")}
 
-    processed_upload = upload_processed_text(bucket, user_id, doc_id, text)
+    processed_upload = upload_processed_text(bucket, user_id, session_id, doc_id, text)
     processed_key = processed_upload["key"]
     processed_attrs = {
         "extraction_mode": extraction_mode,
@@ -570,6 +617,30 @@ def process_record(record):
     try:
         ingestion_job = start_kb_ingestion()
     except Exception as exc:
+        if is_ingestion_already_running_error(exc):
+            try:
+                ingestion_job = latest_active_ingestion_job()
+            except Exception:
+                ingestion_job = {}
+            ingestion_job_id = ingestion_job.get("ingestionJobId", "")
+            ingestion_status = ingestion_job.get("status", "IN_PROGRESS")
+            update_doc(
+                user_id,
+                doc_id,
+                kb_status="PROCESSING",
+                ingestion_job_id=ingestion_job_id,
+                ingestion_status=ingestion_status,
+                ingestion_note="Attached to active KB ingestion job after concurrent start was rejected.",
+                **processed_attrs,
+            )
+            return {
+                "doc_id": doc_id,
+                "status": "PROCESSING",
+                "reason": "ingestion_already_running",
+                "processed_text_s3_key": processed_key,
+                "ingestion_job_id": ingestion_job_id,
+                "ingestion_status": ingestion_status,
+            }
         update_doc(
             user_id,
             doc_id,

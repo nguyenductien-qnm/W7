@@ -15,6 +15,14 @@ from app import (
     sk_quiz_history,
 )
 from quiz_kb import generate_fallback_quiz, generate_quiz_from_kb
+from tool_contract import run_tool_handler
+
+
+def _allocate_counts(total, size):
+    size = max(1, size)
+    base = total // size
+    remainder = total % size
+    return [base + (1 if index < remainder else 0) for index in range(size)]
 
 
 def handle_quiz(event):
@@ -56,18 +64,36 @@ def handle_quiz(event):
 
     questions = []
     if BEDROCK_KNOWLEDGE_BASE_ID:
-        try:
-            questions = generate_quiz_from_kb(
-                knowledge_base_id=BEDROCK_KNOWLEDGE_BASE_ID,
-                selected_doc_ids=[item.get("doc_id") for item in selected_docs if item.get("doc_id")],
-                fallback_concepts=fallback_concepts,
-                count=count,
-            )
-        except Exception:
-            questions = []
+        allocations = _allocate_counts(count, len(selected_docs))
+        for doc, doc_count in zip(selected_docs, allocations):
+            if doc_count <= 0:
+                continue
+            doc_concepts = doc.get("concepts") or fallback_concepts
+            try:
+                questions.extend(
+                    generate_quiz_from_kb(
+                        knowledge_base_id=BEDROCK_KNOWLEDGE_BASE_ID,
+                        selected_doc_ids=[doc.get("doc_id")],
+                        fallback_concepts=doc_concepts,
+                        count=doc_count,
+                        source_title=doc.get("title", ""),
+                    )
+                )
+            except Exception:
+                pass
 
     if not questions:
-        questions = generate_fallback_quiz(fallback_concepts, count=count)
+        allocations = _allocate_counts(count, len(selected_docs))
+        for doc, doc_count in zip(selected_docs, allocations):
+            questions.extend(
+                generate_fallback_quiz(
+                    doc.get("concepts") or fallback_concepts,
+                    count=doc_count,
+                    source_doc_id=doc.get("doc_id", ""),
+                    source_title=doc.get("title", ""),
+                )
+            )
+    questions = questions[:count]
 
     generated_at = now_iso()
     selected_ids = [item.get("doc_id") for item in selected_docs if item.get("doc_id")]
@@ -102,6 +128,7 @@ def handle_quiz(event):
 
 def lambda_handler(event, _context):
     try:
-        return handle_quiz(event)
+        tool_name = "generate_flashcards" if (event.get("input") or event).get("feature") == "flashcards" else "generate_quiz"
+        return run_tool_handler(event, tool_name, handle_quiz)
     except Exception as exc:
         return response(500, {"message": "Internal server error", "error": str(exc)})

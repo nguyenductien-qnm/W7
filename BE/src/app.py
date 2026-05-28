@@ -10,6 +10,7 @@ from email.parser import BytesParser
 
 import boto3
 from boto3.dynamodb.conditions import Attr, Key
+from tool_contract import is_tool_event, tool_name_from_event, tool_payload, tool_response
 
 
 DEMO_USER_ID = "demo"
@@ -166,8 +167,8 @@ def safe_filename(name):
     return cleaned or "uploaded.pdf"
 
 
-def raw_document_key(user_id, doc_id, filename):
-    return f"documents/raw/{user_id}/{doc_id}/{safe_filename(filename)}"
+def raw_document_key(user_id, session_id, doc_id, filename):
+    return f"raw/{user_id}/{session_id or 'default'}/{doc_id}/{safe_filename(filename)}"
 
 
 def use_bedrock_ingestion():
@@ -531,8 +532,8 @@ def handle_upload(event):
         "SK": sk_doc(doc_id),
         "doc_id": doc_id,
         "title": title,
-        "s3_key": raw_document_key(user_id, doc_id, title),
-        "raw_s3_key": raw_document_key(user_id, doc_id, title),
+        "s3_key": raw_document_key(user_id, session_id, doc_id, title),
+        "raw_s3_key": raw_document_key(user_id, session_id, doc_id, title),
         "session_id": session_id,
         "kb_status": "PROCESSING",
         "uploaded_at": uploaded_at,
@@ -555,7 +556,7 @@ def handle_upload_url(event):
     filename = safe_filename(payload.get("filename") or payload.get("title") or "uploaded.pdf")
     content_type = payload.get("content_type") or "application/octet-stream"
     doc_id = payload.get("doc_id") or f"doc_{uuid.uuid4().hex[:10]}"
-    s3_key = raw_document_key(user_id, doc_id, filename)
+    s3_key = raw_document_key(user_id, session_id, doc_id, filename)
 
     ensure_profile(user_id, f"{user_id}@studybot.com")
     ensure_session(user_id, session_id)
@@ -620,7 +621,7 @@ def handle_upload_complete(event, doc_id):
     ingestion_status = "IN_PROGRESS"
     if use_bedrock_ingestion():
         # S3 upload completion only means the raw file exists. ProcessPdfLambda
-        # starts KB ingestion after it writes documents/processed/ text.
+        # starts KB ingestion after it writes processed text.
         ingestion_job_id = ""
         ingestion_status = "WAITING_FOR_PROCESSOR"
 
@@ -852,6 +853,23 @@ def route_request(event):
 
 def lambda_handler(event, _context):
     try:
+        if is_tool_event(event):
+            name = tool_name_from_event(event, "")
+            payload = tool_payload(event)
+            if name == "list_documents":
+                api_event = {
+                    "headers": {
+                        "X-User-Id": str(payload.get("user_id") or ""),
+                        "X-Session-Id": str(payload.get("session_id") or "default"),
+                    },
+                    "queryStringParameters": {
+                        "user_id": payload.get("user_id"),
+                        "session_id": payload.get("session_id") or "default",
+                    },
+                }
+                docs_response = handle_documents_list(api_event)
+                return tool_response("list_documents", "success", data=json.loads(docs_response["body"]))
+            return tool_response(name or "unknown", "error", errors=[f"Unsupported app tool: {name}"])
         return route_request(event)
     except Exception as exc:
         return response(500, {"message": "Internal server error", "error": str(exc)})

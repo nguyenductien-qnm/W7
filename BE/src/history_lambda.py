@@ -1,4 +1,5 @@
 from app import get_session_id, get_user_id, list_user_items, response
+from tool_contract import is_tool_event, parse_http_response, tool_name_from_event, tool_payload, tool_response
 
 
 def _normalize_limit(value, default=200, max_value=500):
@@ -21,6 +22,10 @@ def _is_summary_history(sk):
 
 def _is_quiz_history(sk):
     return "#QUIZ#TS#" in str(sk or "")
+
+
+def _is_exam_plan_history(sk):
+    return str(sk or "").startswith("EXAM_PLAN#TS#")
 
 
 def _to_message_id(prefix, timestamp, suffix):
@@ -84,6 +89,15 @@ def _events_for_session(items, session_id):
             events.append(
                 {
                     "type": "quiz",
+                    "created_at": item.get("generated_at") or "",
+                    "item": item,
+                }
+            )
+            continue
+        if _is_exam_plan_history(sk):
+            events.append(
+                {
+                    "type": "planning",
                     "created_at": item.get("generated_at") or "",
                     "item": item,
                 }
@@ -178,6 +192,44 @@ def _events_to_messages(events):
                     "createdAt": created_at,
                 }
             )
+            continue
+
+        if event_type == "planning":
+            tasks = item.get("tasks") or []
+            messages.append(
+                {
+                    "id": _to_message_id("planning", created_at, "user"),
+                    "role": "user",
+                    "feature": "planning",
+                    "text": f"Create an exam plan for {item.get('exam_date') or 'the exam'}.",
+                    "createdAt": created_at,
+                }
+            )
+            lines = [item.get("summary") or "Exam plan ready.", ""]
+            for task in tasks:
+                lines.append(
+                    f"{task.get('date')}: {task.get('duration_minutes')} min {task.get('activity')} - {task.get('topic')}"
+                )
+            messages.append(
+                {
+                    "id": _to_message_id("planning", created_at, "bot"),
+                    "role": "bot",
+                    "feature": "planning",
+                    "text": "\n".join(lines).strip(),
+                    "plan": {
+                        "plan_id": item.get("plan_id"),
+                        "exam_date": item.get("exam_date"),
+                        "summary": item.get("summary"),
+                        "selected_doc_ids": item.get("selected_doc_ids") or [],
+                        "selected_documents": item.get("selected_documents") or [],
+                        "weak_topics": item.get("weak_topics") or [],
+                        "created_at": item.get("created_at") or item.get("generated_at"),
+                        "generated_at": item.get("generated_at"),
+                        "tasks": tasks,
+                    },
+                    "createdAt": created_at,
+                }
+            )
 
     return messages
 
@@ -207,6 +259,23 @@ def handle_history(event):
 
 def lambda_handler(event, _context):
     try:
-        return handle_history(event)
+        if not is_tool_event(event):
+            return handle_history(event)
+        payload = tool_payload(event)
+        api_event = {
+            "headers": {
+                "X-User-Id": str(payload.get("user_id") or ""),
+                "X-Session-Id": str(payload.get("session_id") or "default"),
+            },
+            "queryStringParameters": {
+                "user_id": payload.get("user_id"),
+                "session_id": payload.get("session_id") or "default",
+                "limit": payload.get("limit"),
+            },
+        }
+        status_code, body = parse_http_response(handle_history(api_event))
+        if 200 <= status_code < 300:
+            return tool_response(tool_name_from_event(event, "get_history"), "success", data=body)
+        return tool_response(tool_name_from_event(event, "get_history"), "error", data=body, errors=[body.get("message") or "History failed"])
     except Exception as exc:
         return response(500, {"message": "Internal server error", "error": str(exc)})

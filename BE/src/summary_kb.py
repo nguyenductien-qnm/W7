@@ -28,6 +28,8 @@ def _clean_text(value):
 def _extract_doc_id_from_uri(source_uri):
     uri = str(source_uri or "")
     patterns = [
+        r"/raw/[^/]+/[^/]+/(?P<doc_id>doc_[^/.]+)/",
+        r"/processed/[^/]+/[^/]+/(?P<doc_id>doc_[^/.]+)\.txt",
         r"/documents/raw/[^/]+/(?P<doc_id>doc_[^/.]+)/",
         r"/documents/processed/[^/]+/(?P<doc_id>doc_[^/.]+)\.txt",
     ]
@@ -56,7 +58,7 @@ def _result_matches_doc_ids(result, allowed_doc_ids):
 
     allowed = {str(doc_id).strip().lower() for doc_id in allowed_doc_ids if str(doc_id).strip()}
     source_uri = str(_extract_source_uri(result) or "").lower()
-    canonical_uri = "/documents/raw/" in source_uri or "/documents/processed/" in source_uri
+    canonical_uri = any(prefix in source_uri for prefix in ("/raw/", "/processed/", "/documents/raw/", "/documents/processed/"))
     doc_id_from_uri = _extract_doc_id_from_uri(source_uri).lower()
     if doc_id_from_uri and doc_id_from_uri in allowed:
         return True
@@ -173,4 +175,64 @@ def summarize_knowledge_base(question, knowledge_base_id, selected_doc_ids, fall
     return {
         "summary": summary,
         "testable_concepts": (concepts or fallback_concepts)[:5],
+    }
+
+
+def _chunk_text(text, max_chars=9000):
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return []
+    return [cleaned[index:index + max_chars] for index in range(0, len(cleaned), max_chars)]
+
+
+def summarize_processed_texts(doc_texts, fallback_concepts):
+    doc_summaries = []
+    concepts = []
+    for doc in doc_texts:
+        title = doc.get("title") or doc.get("doc_id") or "Document"
+        text = doc.get("text") or ""
+        chunk_summaries = []
+        for chunk in _chunk_text(text)[:6]:
+            prompt = (
+                "Summarize this study document chunk in 5-8 concise bullets and list testable concepts. "
+                "Return strict JSON with keys summary and testable_concepts.\n\n"
+                f"Document: {title}\n\nText:\n{chunk}\n\nJSON:"
+            )
+            try:
+                data = _extract_json_object(_invoke_text_model(prompt, max_tokens=800, temperature=0.15))
+            except Exception:
+                data = {}
+            summary = str(data.get("summary") or "").strip()
+            if summary:
+                chunk_summaries.append(summary)
+            extracted = data.get("testable_concepts") or []
+            if isinstance(extracted, list):
+                for concept in extracted:
+                    concept = str(concept).strip()
+                    if concept and concept not in concepts:
+                        concepts.append(concept)
+        if chunk_summaries:
+            doc_summaries.append({"title": title, "summary": "\n".join(chunk_summaries)})
+
+    if not doc_summaries:
+        return {}
+
+    combined = "\n\n".join(f"Document: {item['title']}\n{item['summary']}" for item in doc_summaries)
+    prompt = (
+        "Combine these per-document notes into a multi-document study summary. "
+        "Return strict JSON with keys summary and testable_concepts. "
+        "The summary should be 3-6 short paragraphs and should mention cross-document relationships where useful. "
+        "testable_concepts must be 3-5 short strings.\n\n"
+        f"Notes:\n{combined}\n\nJSON:"
+    )
+    try:
+        data = _extract_json_object(_invoke_text_model(prompt, max_tokens=1100, temperature=0.15))
+    except Exception:
+        data = {}
+    summary = str(data.get("summary") or "").strip()
+    final_concepts = data.get("testable_concepts") if isinstance(data.get("testable_concepts"), list) else concepts
+    final_concepts = [str(item).strip() for item in (final_concepts or concepts or fallback_concepts) if str(item).strip()]
+    return {
+        "summary": summary or "\n\n".join(item["summary"] for item in doc_summaries),
+        "testable_concepts": final_concepts[:5] or fallback_concepts[:5],
     }

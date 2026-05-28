@@ -37,13 +37,31 @@ def _extract_source_uri(result):
     return ""
 
 
+def _extract_doc_id_from_uri(source_uri):
+    uri = str(source_uri or "")
+    patterns = [
+        r"/raw/[^/]+/[^/]+/(?P<doc_id>doc_[^/.]+)/",
+        r"/processed/[^/]+/[^/]+/(?P<doc_id>doc_[^/.]+)\.txt",
+        r"/documents/raw/[^/]+/(?P<doc_id>doc_[^/.]+)/",
+        r"/documents/processed/[^/]+/(?P<doc_id>doc_[^/.]+)\.txt",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, uri)
+        if match:
+            return match.group("doc_id")
+    return ""
+
+
 def _result_matches_doc_ids(result, allowed_doc_ids):
     if not allowed_doc_ids:
         return True
 
     allowed = {str(doc_id).strip().lower() for doc_id in allowed_doc_ids if str(doc_id).strip()}
     source_uri = str(_extract_source_uri(result) or "").lower()
-    canonical_uri = "/documents/raw/" in source_uri or "/documents/processed/" in source_uri
+    canonical_uri = any(prefix in source_uri for prefix in ("/raw/", "/processed/", "/documents/raw/", "/documents/processed/"))
+    doc_id_from_uri = _extract_doc_id_from_uri(source_uri).lower()
+    if doc_id_from_uri and doc_id_from_uri in allowed:
+        return True
     metadata = result.get("metadata") or {}
     meta_doc_id = str(
         metadata.get("doc_id")
@@ -116,7 +134,7 @@ def _extract_json_array(text):
         return []
 
 
-def _normalize_question(item):
+def _normalize_question(item, source_doc_id="", source_title=""):
     if not isinstance(item, dict):
         return None
     question = str(item.get("question") or "").strip()
@@ -130,15 +148,24 @@ def _normalize_question(item):
         return None
     if answer not in {"A", "B", "C", "D"}:
         return None
-    return {
+    question_item = {
         "question": question,
         "options": options,
         "answer": answer,
         "explanation": explanation,
     }
+    if source_doc_id and not item.get("source_doc_id"):
+        question_item["source_doc_id"] = source_doc_id
+    elif item.get("source_doc_id"):
+        question_item["source_doc_id"] = str(item.get("source_doc_id"))
+    if source_title and not item.get("source_title"):
+        question_item["source_title"] = source_title
+    elif item.get("source_title"):
+        question_item["source_title"] = str(item.get("source_title"))
+    return question_item
 
 
-def _build_mcq(concept, idx):
+def _build_mcq(concept, idx, source_doc_id="", source_title=""):
     correct = f"It is one of the main ideas the document asks the student to understand about {concept}."
     distractors = [
         "It is unrelated decorative formatting.",
@@ -149,12 +176,17 @@ def _build_mcq(concept, idx):
     rotate = idx % 4
     rotated = options[rotate:] + options[:rotate]
     answer_letter = ["A", "B", "C", "D"][rotated.index(correct)]
-    return {
+    question = {
         "question": f"Which statement best matches the document's treatment of {concept}?",
         "options": rotated,
         "answer": answer_letter,
         "explanation": f"{concept} appears as a testable idea from the selected document concepts.",
     }
+    if source_doc_id:
+        question["source_doc_id"] = source_doc_id
+    if source_title:
+        question["source_title"] = source_title
+    return question
 
 
 def _normalize_count(value):
@@ -164,13 +196,13 @@ def _normalize_count(value):
         return 5
 
 
-def generate_fallback_quiz(concepts, count=5):
+def generate_fallback_quiz(concepts, count=5, source_doc_id="", source_title=""):
     count = _normalize_count(count)
     source = [str(concept).strip() for concept in (concepts or []) if str(concept).strip()]
     source = source or ["Core idea", "Trade-offs", "Architecture", "Reliability", "Performance"]
     questions = []
     for idx, concept in enumerate(source):
-        questions.append(_build_mcq(concept, idx))
+        questions.append(_build_mcq(concept, idx, source_doc_id, source_title))
         if len(questions) >= count:
             break
     return questions
@@ -181,6 +213,7 @@ def generate_quiz_from_kb(
     selected_doc_ids,
     fallback_concepts,
     count=5,
+    source_title="",
 ):
     count = _normalize_count(count)
     try:
@@ -206,6 +239,7 @@ def generate_quiz_from_kb(
         "Generate multiple-choice quiz questions using only the grounded context. "
         f"Return strict JSON as an array of {count} objects. "
         "Each object must have question, options, answer, and explanation. "
+        "Include source_doc_id and source_title when known. "
         "options must have exactly 4 strings. answer must be A, B, C, or D. "
         "Questions must be subject-relevant to the selected document, not generic filler.\n\n"
         f"Grounded context:\n{context}\n\n"
@@ -218,7 +252,7 @@ def generate_quiz_from_kb(
 
     questions = []
     for item in _extract_json_array(generated):
-        normalized = _normalize_question(item)
+        normalized = _normalize_question(item, selected_doc_ids[0] if selected_doc_ids else "", source_title)
         if normalized:
             questions.append(normalized)
         if len(questions) >= count:

@@ -17,9 +17,11 @@ Resources:
           - Content-Type
           - Authorization
           - X-User-Id
+          - X-Session-Id
         AllowMethods:
           - GET
           - POST
+          - DELETE
           - OPTIONS
         AllowOrigins:
           - "*"
@@ -48,14 +50,13 @@ Resources:
       Environment:
         Variables:
           DOCUMENTS_TABLE: !Ref DocumentsTable
-          AWS_REGION: ap-southeast-1
           INGESTION_MODE: mock
           UPLOADS_BUCKET_NAME: studybotdatastack-uploadbucketd2c1da78-2cpeowy02vjk
           BEDROCK_KNOWLEDGE_BASE_ID: LI32IWLOB5
           BEDROCK_DATA_SOURCE_ID: V0ISBKEMXT
           BEDROCK_GENERATION_MODEL_ID: global.amazon.nova-2-lite-v1:0
           VECTOR_INDEX_ARN: arn:aws:s3vectors:ap-southeast-1:589077667575:bucket/studybot-vectors-589077667575-ap-southeast-1/index/studybot-kb-index
-          KB_PROCESSED_PREFIX: documents/processed
+          KB_PROCESSED_PREFIX: processed
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref DocumentsTable
@@ -63,7 +64,9 @@ Resources:
             - Effect: Allow
               Action:
                 - s3:PutObject
-              Resource: arn:aws:s3:::studybotdatastack-uploadbucketd2c1da78-2cpeowy02vjk/documents/*
+              Resource:
+                - arn:aws:s3:::studybotdatastack-uploadbucketd2c1da78-2cpeowy02vjk/raw/*
+                - arn:aws:s3:::studybotdatastack-uploadbucketd2c1da78-2cpeowy02vjk/documents/*
             - Effect: Allow
               Action:
                 - bedrock:StartIngestionJob
@@ -149,12 +152,14 @@ Resources:
       Environment:
         Variables:
           DOCUMENTS_TABLE: !Ref DocumentsTable
-          AWS_REGION: ap-southeast-1
           INGESTION_MODE: mock
           BEDROCK_KNOWLEDGE_BASE_ID: LI32IWLOB5
           BEDROCK_DATA_SOURCE_ID: V0ISBKEMXT
           BEDROCK_GENERATION_MODEL_ID: global.amazon.nova-2-lite-v1:0
           VECTOR_INDEX_ARN: arn:aws:s3vectors:ap-southeast-1:589077667575:bucket/studybot-vectors-589077667575-ap-southeast-1/index/studybot-kb-index
+          UPLOADS_BUCKET_NAME: studybotdatastack-uploadbucketd2c1da78-2cpeowy02vjk
+          AGENTCORE_MEMORY_ID: ""
+          AGENTCORE_MEMORY_STRATEGY_ID: ""
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref DocumentsTable
@@ -170,6 +175,11 @@ Resources:
               Resource:
                 - arn:aws:bedrock:ap-southeast-1:589077667575:inference-profile/global.amazon.nova-2-lite-v1:0
                 - arn:aws:bedrock:*::foundation-model/amazon.nova-2-lite-v1:0
+            - Effect: Allow
+              Action:
+                - bedrock-agentcore:CreateEvent
+                - bedrock-agentcore:RetrieveMemoryRecords
+              Resource: "*"
       Events:
         AskApi:
           Type: HttpApi
@@ -187,16 +197,22 @@ Resources:
       Environment:
         Variables:
           DOCUMENTS_TABLE: !Ref DocumentsTable
-          AWS_REGION: ap-southeast-1
           INGESTION_MODE: mock
           BEDROCK_KNOWLEDGE_BASE_ID: LI32IWLOB5
           BEDROCK_DATA_SOURCE_ID: V0ISBKEMXT
           BEDROCK_GENERATION_MODEL_ID: global.amazon.nova-2-lite-v1:0
           VECTOR_INDEX_ARN: arn:aws:s3vectors:ap-southeast-1:589077667575:bucket/studybot-vectors-589077667575-ap-southeast-1/index/studybot-kb-index
+          UPLOADS_BUCKET_NAME: studybotdatastack-uploadbucketd2c1da78-2cpeowy02vjk
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref DocumentsTable
         - Statement:
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+              Resource:
+                - arn:aws:s3:::studybotdatastack-uploadbucketd2c1da78-2cpeowy02vjk/processed/*
+                - arn:aws:s3:::studybotdatastack-uploadbucketd2c1da78-2cpeowy02vjk/documents/processed/*
             - Effect: Allow
               Action:
                 - bedrock:Retrieve
@@ -225,7 +241,6 @@ Resources:
       Environment:
         Variables:
           DOCUMENTS_TABLE: !Ref DocumentsTable
-          AWS_REGION: ap-southeast-1
           INGESTION_MODE: mock
           BEDROCK_KNOWLEDGE_BASE_ID: LI32IWLOB5
           BEDROCK_DATA_SOURCE_ID: V0ISBKEMXT
@@ -254,6 +269,74 @@ Resources:
             Path: /quiz
             Method: POST
 
+  PlannerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: planner_lambda.lambda_handler
+      Timeout: 60
+      Environment:
+        Variables:
+          DOCUMENTS_TABLE: !Ref DocumentsTable
+          INGESTION_MODE: mock
+          BEDROCK_KNOWLEDGE_BASE_ID: LI32IWLOB5
+          BEDROCK_DATA_SOURCE_ID: V0ISBKEMXT
+          BEDROCK_GENERATION_MODEL_ID: global.amazon.nova-2-lite-v1:0
+          VECTOR_INDEX_ARN: arn:aws:s3vectors:ap-southeast-1:589077667575:bucket/studybot-vectors-589077667575-ap-southeast-1/index/studybot-kb-index
+          AGENTCORE_MEMORY_ID: ""
+          AGENTCORE_MEMORY_STRATEGY_ID: ""
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DocumentsTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:Retrieve
+              Resource:
+                - arn:aws:bedrock:ap-southeast-1:589077667575:knowledge-base/LI32IWLOB5
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource:
+                - arn:aws:bedrock:ap-southeast-1:589077667575:inference-profile/global.amazon.nova-2-lite-v1:0
+                - arn:aws:bedrock:*::foundation-model/amazon.nova-2-lite-v1:0
+            - Effect: Allow
+              Action:
+                - bedrock-agentcore:CreateEvent
+                - bedrock-agentcore:RetrieveMemoryRecords
+              Resource: "*"
+      Events:
+        PlannerApi:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref StudyBotApi
+            Path: /planner
+            Method: POST
+        PlannerListApi:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref StudyBotApi
+            Path: /planner
+            Method: GET
+        PlannerDetailApi:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref StudyBotApi
+            Path: /planner/{plan_id}
+            Method: GET
+        PlannerDeleteApi:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref StudyBotApi
+            Path: /planner/{plan_id}
+            Method: DELETE
+        PlannerRecommendDocsApi:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref StudyBotApi
+            Path: /planner/{plan_id}/recommend-docs
+            Method: POST
+
   HistoryFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -263,7 +346,6 @@ Resources:
       Environment:
         Variables:
           DOCUMENTS_TABLE: !Ref DocumentsTable
-          AWS_REGION: ap-southeast-1
           INGESTION_MODE: mock
           BEDROCK_KNOWLEDGE_BASE_ID: LI32IWLOB5
           BEDROCK_DATA_SOURCE_ID: V0ISBKEMXT

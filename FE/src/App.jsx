@@ -11,7 +11,16 @@ const FEATURES = {
   summary: { label: "Summary", placeholder: "Summarize the selected documents..." },
   quiz: { label: "Quiz", placeholder: "Quiz me on the selected documents..." },
   flashcards: { label: "Flash Cards", placeholder: "Create review cards from the selected documents..." },
+  planning: { label: "Exam Planner", placeholder: "Exam date and hours, e.g. 2026-06-20, 2 hours daily..." },
 };
+
+const FEATURE_MENU = [
+  { key: "chat", label: "Chat with Docs", icon: "chat" },
+  { key: "summary", label: "Summarize Docs", icon: "summary" },
+  { key: "flashcards", label: "Flash Cards", icon: "cards" },
+  { key: "quiz", label: "Quiz", icon: "quiz" },
+  { key: "planning", label: "Exam Planner", icon: "calendar" },
+];
 
 function uid(prefix) {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -242,6 +251,113 @@ function renderMarkdownText(text, messageId, citations = [], onOpenCitation = nu
   return <div className="markdown-body">{blocks}</div>;
 }
 
+function flashcardBack(question) {
+  const options = safeArray(question.options);
+  const correctIndex = answerIndex(question);
+  const answerText = options[correctIndex] || String(question.answer || "").trim();
+  const explanation = String(question.explanation || "").trim();
+  return [answerText, explanation].filter(Boolean).join("\n\n");
+}
+
+function cleanFlashcardBack(value) {
+  return String(value || "").replace(/^[A-D](?:[.)-]|\s+)+/i, "").trimStart();
+}
+
+function parsePlannerPrompt(prompt) {
+  const text = String(prompt || "");
+  const examDate = text.match(/\b(20\d{2}-\d{2}-\d{2})\b/)?.[1] || "";
+  const daily = text.match(/(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h)\s*(?:per\s+day|daily|\/\s*day)/i);
+  const weekly = text.match(/(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h)\s*(?:per\s+week|weekly|\/\s*week)/i);
+  const sessionLength = text.match(/(\d+)\s*(?:minutes?|mins?|m)\s*(?:sessions?|session length)/i);
+  const weakTopics = text.match(/weak topics?\s*:\s*([^.;]+)/i)?.[1];
+  const excludedDays = text.match(/(?:exclude|excluded days?)\s*:\s*([^.;]+)/i)?.[1];
+  const targetGrade = text.match(/(?:target grade|goal)\s*:\s*([^.;]+)/i)?.[1]?.trim();
+  return {
+    exam_date: examDate,
+    daily_study_hours: daily ? Number(daily[1]) : undefined,
+    weekly_study_hours: weekly ? Number(weekly[1]) : undefined,
+    preferred_session_length: sessionLength ? Number(sessionLength[1]) : undefined,
+    weak_topics: weakTopics ? weakTopics.split(",").map((item) => item.trim()).filter(Boolean) : undefined,
+    excluded_days: excludedDays ? excludedDays.split(",").map((item) => item.trim()).filter(Boolean) : undefined,
+    target_grade: targetGrade,
+  };
+}
+
+function renderPlanText(plan) {
+  const tasks = safeArray(plan?.tasks);
+  const lines = [plan?.summary || "Exam plan ready.", ""];
+  tasks.slice(0, 12).forEach((task) => {
+    lines.push(`${task.date}: ${task.duration_minutes} min ${task.activity} - ${task.topic}`);
+  });
+  if (tasks.length > 12) lines.push(`...and ${tasks.length - 12} more sessions.`);
+  return lines.join("\n").trim();
+}
+
+function dateLabel(value) {
+  if (!value) return "";
+  return new Date(value).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
+}
+
+function MenuIcon({ name }) {
+  const common = {
+    className: "menu-icon",
+    viewBox: "0 0 24 24",
+    "aria-hidden": "true",
+  };
+  if (name === "summary") {
+    return (
+      <svg {...common}>
+        <path d="M7 3h7l4 4v14H7z" />
+        <path d="M14 3v5h5" />
+        <path d="M9 12h6" />
+        <path d="M9 16h6" />
+      </svg>
+    );
+  }
+  if (name === "cards") {
+    return (
+      <svg {...common}>
+        <rect x="4" y="7" width="12" height="10" rx="2" />
+        <path d="M8 7V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2" />
+        <path d="M8 12h4" />
+      </svg>
+    );
+  }
+  if (name === "quiz") {
+    return (
+      <svg {...common}>
+        <path d="M21 12a9 9 0 1 1-3-6.7" />
+        <path d="M21 4l-9 9" />
+        <path d="M12 13l-3-3" />
+      </svg>
+    );
+  }
+  if (name === "calendar") {
+    return (
+      <svg {...common}>
+        <rect x="4" y="5" width="16" height="15" rx="2" />
+        <path d="M8 3v4" />
+        <path d="M16 3v4" />
+        <path d="M4 10h16" />
+      </svg>
+    );
+  }
+  if (name === "upload") {
+    return (
+      <svg {...common}>
+        <path d="M12 16V4" />
+        <path d="M7 9l5-5 5 5" />
+        <path d="M5 20h14" />
+      </svg>
+    );
+  }
+  return (
+    <svg {...common}>
+      <path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z" />
+    </svg>
+  );
+}
+
 export default function App() {
   const [auth, setAuth] = useState(getSavedAuth());
   const [loginEmail, setLoginEmail] = useState(getSavedAuth().email || "");
@@ -260,6 +376,8 @@ export default function App() {
   const [messagesBySession, setMessagesBySession] = useState({});
 
   const [docs, setDocs] = useState([]);
+  const [plans, setPlans] = useState([]);
+  const [activePlan, setActivePlan] = useState(null);
   const [selectedDocIds, setSelectedDocIds] = useState(() =>
     loadJson(storageKey(currentUserId, "selected-docs"), [])
   );
@@ -282,6 +400,7 @@ export default function App() {
     upload: false,
     login: false,
     send: false,
+    plans: false,
   });
 
   const chatRef = useRef(null);
@@ -292,7 +411,10 @@ export default function App() {
   const selectedDocs = docs.filter((doc) => selectedDocIds.includes(doc.doc_id));
   const readyDocs = docs.filter(isReady);
   const selectedReadyCount = selectedDocs.filter(isReady).length;
-  const canSend = input.trim() && selectedDocIds.length && !busy.send;
+  const canSend =
+    input.trim() &&
+    !busy.send &&
+    (activeFeature === "planning" ? readyDocs.length > 0 : selectedDocIds.length > 0);
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
@@ -317,13 +439,14 @@ export default function App() {
 
   useEffect(() => {
     chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: "smooth" });
-  }, [messages]);
+  }, [activeSessionId, messages.length]);
 
   useEffect(() => {
     async function boot() {
       setMessagesBySession({});
       await refreshSessions();
       await refreshDocs();
+      await refreshPlans(activeSessionId);
     }
     boot();
   }, [currentUserId]);
@@ -331,6 +454,7 @@ export default function App() {
   useEffect(() => {
     refreshDocs();
     refreshHistory(activeSessionId);
+    refreshPlans(activeSessionId);
   }, [activeSessionId]);
 
   useEffect(() => {
@@ -414,6 +538,7 @@ export default function App() {
       citations: safeArray(message.citations),
       quiz: safeArray(message.quiz),
       cards: safeArray(message.cards),
+      plan: message.plan || null,
       createdAt: message.createdAt || message.created_at || new Date().toISOString(),
     }));
   }
@@ -495,6 +620,93 @@ export default function App() {
 
   function clearChat() {
     setMessagesBySession((prev) => ({ ...prev, [activeSessionId]: [] }));
+  }
+
+  function selectFeature(key) {
+    setActiveFeature(key);
+    setPlusOpen(false);
+  }
+
+  async function refreshPlans(sessionId = activeSessionId) {
+    setBusyFlag("plans", true);
+    try {
+      const body = await call(`/planner?session_id=${encodeURIComponent(sessionId)}`);
+      const nextPlans = safeArray(body.plans);
+      setPlans(nextPlans);
+      setActivePlan((prev) => {
+        if (prev && nextPlans.some((plan) => plan.plan_id === prev.plan_id)) return prev;
+        return nextPlans[0] || null;
+      });
+    } catch (err) {
+      showToast(`Planner load failed: ${err.message}`);
+    } finally {
+      setBusyFlag("plans", false);
+    }
+  }
+
+  async function openPlan(planId) {
+    if (!planId) return;
+    try {
+      const body = await call(`/planner/${encodeURIComponent(planId)}?session_id=${encodeURIComponent(activeSessionId)}`);
+      setActivePlan(body);
+    } catch (err) {
+      showToast(err.message);
+    }
+  }
+
+  function applyPlanDocIds(docIds, label = "Plan documents selected.") {
+    const readyDocIds = new Set(readyDocs.map((doc) => doc.doc_id));
+    const nextIds = safeArray(docIds)
+      .map((docId) => String(docId || ""))
+      .filter((docId) => docId && readyDocIds.has(docId))
+      .slice(0, contextLimit || 99);
+    if (!nextIds.length) {
+      showToast("No ready documents from this plan are available in the active session.");
+      return;
+    }
+    setSelectedDocIds(nextIds);
+    setActiveFeature("chat");
+    showToast(label);
+  }
+
+  async function recommendPlanDocs(planId) {
+    if (!planId) return;
+    setBusyFlag("plans", true);
+    try {
+      const body = await call(
+        `/planner/${encodeURIComponent(planId)}/recommend-docs?session_id=${encodeURIComponent(activeSessionId)}`,
+        {
+          method: "POST",
+          json: { user_id: currentUserId, session_id: activeSessionId, limit: contextLimit || 5 },
+        }
+      );
+      const recommendedDocs = safeArray(body.recommended_documents);
+      const recommendedIds = safeArray(body.recommended_doc_ids);
+      setActivePlan((prev) =>
+        prev?.plan_id === planId
+          ? { ...prev, recommended_documents: recommendedDocs, recommended_doc_ids: recommendedIds }
+          : prev
+      );
+      applyPlanDocIds(recommendedIds, `Selected ${recommendedIds.length} relevant plan document${recommendedIds.length === 1 ? "" : "s"}.`);
+    } catch (err) {
+      showToast(err.message);
+    } finally {
+      setBusyFlag("plans", false);
+    }
+  }
+
+  async function deletePlan(planId) {
+    if (!planId) return;
+    try {
+      await call(`/planner/${encodeURIComponent(planId)}?session_id=${encodeURIComponent(activeSessionId)}`, {
+        method: "DELETE",
+      });
+      setPlans((prev) => prev.filter((plan) => plan.plan_id !== planId));
+      setActivePlan((prev) => (prev?.plan_id === planId ? null : prev));
+      showToast("Plan deleted.");
+    } catch (err) {
+      showToast(err.message);
+    }
   }
 
   async function createSession(name) {
@@ -707,8 +919,13 @@ export default function App() {
   async function send() {
     const prompt = input.trim();
     if (!prompt || busy.send) return;
-    if (!selectedDocIds.length) {
+    if (activeFeature !== "planning" && !selectedDocIds.length) {
       showToast("Select at least one document for context.");
+      setFileModalOpen(true);
+      return;
+    }
+    if (activeFeature === "planning" && !readyDocs.length) {
+      showToast("Upload documents and wait for processing before planning.");
       setFileModalOpen(true);
       return;
     }
@@ -780,7 +997,7 @@ export default function App() {
           quiz: questions,
           loading: false,
         });
-      } else {
+      } else if (activeFeature === "flashcards") {
         const body = await call("/quiz", {
           method: "POST",
           json: {
@@ -797,11 +1014,36 @@ export default function App() {
         const cards = safeArray(body.questions).map((q) => ({
           id: uid("card"),
           front: q.question || "",
-          back: `${q.answer || ""}${q.explanation ? `\n\n${q.explanation}` : ""}`,
+          back: flashcardBack(q),
         }));
         updateMessage(botId, {
           text: cards.length ? `Created ${cards.length} flash cards.` : "No flash cards returned.",
           cards,
+          loading: false,
+        });
+      } else {
+        const plannerInput = parsePlannerPrompt(prompt);
+        if (!plannerInput.exam_date || (!plannerInput.daily_study_hours && !plannerInput.weekly_study_hours)) {
+          throw new Error("Include an exam date as YYYY-MM-DD and daily or weekly study hours.");
+        }
+        const readyDocIds = new Set(readyDocs.map((doc) => doc.doc_id));
+        const plannerDocIds = scopedDocIds.filter((docId) => readyDocIds.has(docId));
+        const body = await call("/planner", {
+          method: "POST",
+          json: {
+            ...plannerInput,
+            user_id: currentUserId,
+            session_id: activeSessionId,
+            ...(plannerDocIds.length
+              ? { doc_id: plannerDocIds[0], selected_doc_ids: plannerDocIds }
+              : {}),
+          },
+        });
+        setActivePlan(body);
+        await refreshPlans(activeSessionId);
+        updateMessage(botId, {
+          text: renderPlanText(body),
+          plan: body,
           loading: false,
         });
       }
@@ -959,6 +1201,124 @@ export default function App() {
           </div>
         </header>
 
+        {activeFeature === "planning" && (
+          <section className="planner-view" aria-label="Exam planner">
+            <div className="planner-list">
+              <div className="planner-view-head">
+                <div>
+                  <h2>Saved Plans</h2>
+                  <p>{busy.plans ? "Loading plans..." : `${plans.length} plan${plans.length === 1 ? "" : "s"}`}</p>
+                </div>
+                <button className="soft-btn" onClick={() => refreshPlans(activeSessionId)} disabled={busy.plans}>
+                  Refresh
+                </button>
+              </div>
+              {plans.length ? (
+                plans.map((plan) => (
+                  <button
+                    className={`plan-row ${activePlan?.plan_id === plan.plan_id ? "active" : ""}`}
+                    key={plan.plan_id}
+                    onClick={() => openPlan(plan.plan_id)}
+                  >
+                    <span>
+                      <strong>{dateLabel(plan.exam_date) || plan.exam_date}</strong>
+                      <small>{dateLabel(plan.created_at || plan.generated_at)}</small>
+                    </span>
+                    <em>
+                      {plan.selected_doc_count ?? safeArray(plan.selected_doc_ids).length} docs /{" "}
+                      {plan.task_count ?? safeArray(plan.tasks).length} tasks
+                    </em>
+                  </button>
+                ))
+              ) : (
+                <div className="empty-state">No saved plans in this session.</div>
+              )}
+            </div>
+            <div className="planner-detail">
+              {activePlan ? (
+                <>
+                  <div className="planner-detail-head">
+                    <div>
+                      <h2>{dateLabel(activePlan.exam_date) || activePlan.exam_date}</h2>
+                      <p>{activePlan.summary}</p>
+                    </div>
+                    <div className="planner-actions">
+                      <button
+                        className="soft-btn"
+                        onClick={() => applyPlanDocIds(activePlan.selected_doc_ids, "Selected the plan source documents.")}
+                      >
+                        Use Sources
+                      </button>
+                      <button
+                        className="soft-btn"
+                        onClick={() => recommendPlanDocs(activePlan.plan_id)}
+                        disabled={busy.plans}
+                      >
+                        Find Docs
+                      </button>
+                      <button className="soft-btn danger" onClick={() => deletePlan(activePlan.plan_id)}>
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                  <div className="plan-meta-grid">
+                    <div>
+                      <span>Sources</span>
+                      <strong>{safeArray(activePlan.selected_documents).length || safeArray(activePlan.selected_doc_ids).length}</strong>
+                    </div>
+                    <div>
+                      <span>Tasks</span>
+                      <strong>{safeArray(activePlan.tasks).length}</strong>
+                    </div>
+                    <div>
+                      <span>Created</span>
+                      <strong>{dateLabel(activePlan.created_at || activePlan.generated_at)}</strong>
+                    </div>
+                  </div>
+                  <div className="source-strip">
+                    {safeArray(activePlan.selected_documents).length
+                      ? safeArray(activePlan.selected_documents).map((doc) => (
+                          <span key={doc.doc_id}>{doc.title || doc.doc_id}</span>
+                        ))
+                      : safeArray(activePlan.selected_doc_ids).map((docId) => <span key={docId}>{docId}</span>)}
+                  </div>
+                  {safeArray(activePlan.weak_topics).length ? (
+                    <div className="weak-topic-strip">
+                      {safeArray(activePlan.weak_topics).slice(0, 8).map((topic, index) => (
+                        <span key={`${topic}-${index}`}>{topic}</span>
+                      ))}
+                    </div>
+                  ) : null}
+                  {safeArray(activePlan.recommended_documents).length ? (
+                    <div className="recommended-docs">
+                      {safeArray(activePlan.recommended_documents).map((doc) => (
+                        <div className="recommended-doc" key={doc.doc_id}>
+                          <strong>{doc.title || doc.doc_id}</strong>
+                          <span>{safeArray(doc.reasons).join(" / ")}</span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                  <div className="planner-panel full">
+                    {safeArray(activePlan.tasks).map((task, taskIndex) => (
+                      <div className="planner-task" key={`${activePlan.plan_id}-task-${taskIndex}`}>
+                        <time>{task.date}</time>
+                        <strong>{task.topic}</strong>
+                        <span>
+                          {task.duration_minutes} min - {task.activity}
+                        </span>
+                        {task.reason ? <small>{task.reason}</small> : null}
+                      </div>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <div className="empty-state">Create or select a plan to inspect its sources and schedule.</div>
+              )}
+            </div>
+          </section>
+        )}
+
         <section className="chat-area" ref={chatRef}>
           {!messages.length ? (
             <div className="welcome">
@@ -1038,8 +1398,23 @@ export default function App() {
                         key={card.id}
                         onClick={() => toggleCard(message.id, card.id)}
                       >
-                        {message.flippedCards?.[card.id] ? card.back : card.front}
+                        <span className="flash-face flash-front">{card.front}</span>
+                        <span className="flash-face flash-back">{cleanFlashcardBack(card.back)}</span>
                       </button>
+                    ))}
+                  </div>
+                ) : null}
+                {message.plan?.tasks?.length ? (
+                  <div className="planner-panel">
+                    {message.plan.tasks.map((task, taskIndex) => (
+                      <div className="planner-task" key={`${message.id}-plan-${taskIndex}`}>
+                        <time>{task.date}</time>
+                        <strong>{task.topic}</strong>
+                        <span>
+                          {task.duration_minutes} min - {task.activity}
+                        </span>
+                        {task.reason ? <small>{task.reason}</small> : null}
+                      </div>
                     ))}
                   </div>
                 ) : null}
@@ -1079,22 +1454,28 @@ export default function App() {
               </button>
               {plusOpen && (
                 <div className="plus-menu">
-                  <button onClick={() => fileInputRef.current?.click()}>Upload files</button>
-                  <button onClick={() => setFileModalOpen(true)}>Choose context</button>
-                  <button onClick={clearChat}>Clear chat</button>
-                  <div className="menu-divider" />
-                  {Object.entries(FEATURES).map(([key, feature]) => (
+                  <div className="plus-menu-label">Feature</div>
+                  {FEATURE_MENU.map((feature) => (
                     <button
-                      className={activeFeature === key ? "active" : ""}
-                      key={key}
-                      onClick={() => {
-                        setActiveFeature(key);
-                        setPlusOpen(false);
-                      }}
+                      className={`feature-opt ${activeFeature === feature.key ? "active" : ""}`}
+                      key={feature.key}
+                      onClick={() => selectFeature(feature.key)}
                     >
-                      {feature.label}
+                      <MenuIcon name={feature.icon} />
+                      <span>{feature.label}</span>
                     </button>
                   ))}
+                  <div className="menu-divider" />
+                  <button
+                    className="feature-opt"
+                    onClick={() => {
+                      setPlusOpen(false);
+                      fileInputRef.current?.click();
+                    }}
+                  >
+                    <MenuIcon name="upload" />
+                    <span>Upload File</span>
+                  </button>
                 </div>
               )}
             </div>
