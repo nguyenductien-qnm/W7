@@ -11,6 +11,7 @@ from email.parser import BytesParser
 
 import boto3
 from boto3.dynamodb.conditions import Attr, Key
+from botocore.config import Config
 from tool_contract import is_tool_event, tool_name_from_event, tool_payload, tool_response
 
 
@@ -40,11 +41,16 @@ TABLE = _dynamodb_resource().Table(TABLE_NAME)
 
 
 def _s3_client():
-    kwargs = {"region_name": AWS_REGION}
+    kwargs = {
+        "region_name": AWS_REGION,
+        "config": Config(signature_version="s3v4", s3={"addressing_style": "virtual"}),
+    }
     if DDB_ENDPOINT_URL:
         # Keep local override behavior consistent when custom credentials are injected.
         kwargs["aws_access_key_id"] = os.environ.get("AWS_ACCESS_KEY_ID", "dummy")
         kwargs["aws_secret_access_key"] = os.environ.get("AWS_SECRET_ACCESS_KEY", "dummy")
+    else:
+        kwargs["endpoint_url"] = f"https://s3.{AWS_REGION}.amazonaws.com"
     return boto3.client("s3", **kwargs)
 
 

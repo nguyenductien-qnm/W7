@@ -30,8 +30,6 @@ def _extract_doc_id_from_uri(source_uri):
     patterns = [
         r"/raw/[^/]+/[^/]+/(?P<doc_id>doc_[^/.]+)/",
         r"/processed/[^/]+/[^/]+/(?P<doc_id>doc_[^/.]+)\.txt",
-        r"/documents/raw/[^/]+/(?P<doc_id>doc_[^/.]+)/",
-        r"/documents/processed/[^/]+/(?P<doc_id>doc_[^/.]+)\.txt",
     ]
     for pattern in patterns:
         match = re.search(pattern, uri)
@@ -58,7 +56,7 @@ def _result_matches_doc_ids(result, allowed_doc_ids):
 
     allowed = {str(doc_id).strip().lower() for doc_id in allowed_doc_ids if str(doc_id).strip()}
     source_uri = str(_extract_source_uri(result) or "").lower()
-    canonical_uri = any(prefix in source_uri for prefix in ("/raw/", "/processed/", "/documents/raw/", "/documents/processed/"))
+    canonical_uri = any(prefix in source_uri for prefix in ("/raw/", "/processed/"))
     doc_id_from_uri = _extract_doc_id_from_uri(source_uri).lower()
     if doc_id_from_uri and doc_id_from_uri in allowed:
         return True

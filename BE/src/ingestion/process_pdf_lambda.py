@@ -55,16 +55,10 @@ def now_iso():
 
 
 def parse_object_key(key):
-    # New upload key: raw/{user_id}/{session_id}/{doc_id}/{filename}
+    # Upload key: raw/{user_id}/{session_id}/{doc_id}/{filename}
     match = re.match(r"^raw/(?P<user_id>[^/]+)/(?P<session_id>[^/]+)/(?P<doc_id>[^/]+)/(?P<filename>.+)$", key)
     if match:
         return match.groupdict()
-    # Legacy upload key: documents/raw/{user_id}/{doc_id}/{filename}
-    match = re.match(r"^documents/raw/(?P<user_id>[^/]+)/(?P<doc_id>[^/]+)/(?P<filename>.+)$", key)
-    if match:
-        parsed = match.groupdict()
-        parsed["session_id"] = ""
-        return parsed
     return None
 
 
@@ -452,14 +446,8 @@ def extract_with_textract(bucket, key):
 
 def delete_processed_objects(bucket, user_id, session_id, doc_id):
     processed_root = KB_PROCESSED_PREFIX.rstrip("/")
-    keys = [
-        f"{processed_root}/{user_id}/{session_id}/{doc_id}.txt",
-        f"documents/processed/{user_id}/{doc_id}.txt",
-    ]
-    chunk_prefixes = [
-        f"{processed_root}/{user_id}/{session_id}/{doc_id}/",
-        f"documents/processed/{user_id}/{doc_id}/",
-    ]
+    keys = [f"{processed_root}/{user_id}/{session_id}/{doc_id}.txt"]
+    chunk_prefixes = [f"{processed_root}/{user_id}/{session_id}/{doc_id}/"]
 
     for chunk_prefix in chunk_prefixes:
         token = None
@@ -559,7 +547,7 @@ def process_record(record):
     key = unquote_plus(key)
     parsed = parse_object_key(key)
     if not parsed:
-        return {"skipped": True, "reason": "key_not_in_documents_prefix", "key": key}
+        return {"skipped": True, "reason": "key_not_in_raw_prefix", "key": key}
 
     user_id = parsed["user_id"]
     doc_id = parsed["doc_id"]

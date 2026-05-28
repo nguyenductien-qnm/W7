@@ -44,7 +44,6 @@ def _processed_key_candidates(doc):
     doc_id = doc.get("doc_id")
     for key in (
         f"processed/{user_id}/{session_id}/{doc_id}.txt",
-        f"documents/processed/{user_id}/{doc_id}.txt",
     ):
         if user_id and doc_id and key not in keys:
             keys.append(key)
