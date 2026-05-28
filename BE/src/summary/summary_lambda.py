@@ -1,4 +1,4 @@
-from app import (
+from core import (
     BEDROCK_KNOWLEDGE_BASE_ID,
     TABLE,
     UPLOADS_BUCKET_NAME,
@@ -18,7 +18,7 @@ from app import (
 import boto3
 from botocore.exceptions import ClientError
 
-from summary_kb import summarize_knowledge_base, summarize_processed_texts
+from .summary_kb import summarize_knowledge_base, summarize_processed_texts
 from tool_contract import run_tool_handler
 
 
@@ -27,10 +27,18 @@ S3 = boto3.client("s3")
 
 def _processed_key_candidates(doc):
     keys = []
+    doc_id = str(doc.get("doc_id") or "").strip()
     for field in ("processed_text_s3_key", "processed_s3_key", "processed_s3_prefix"):
         value = str(doc.get(field) or "").strip()
-        if value and value.endswith(".txt") and value not in keys:
+        if not value:
+            continue
+        if value.endswith(".txt") and value not in keys:
             keys.append(value)
+            continue
+        if value.endswith("/") and doc_id:
+            composed = f"{value}{doc_id}.txt"
+            if composed not in keys:
+                keys.append(composed)
     user_id = str(doc.get("PK") or "").replace("USER#", "")
     session_id = str(doc.get("session_id") or "default")
     doc_id = doc.get("doc_id")

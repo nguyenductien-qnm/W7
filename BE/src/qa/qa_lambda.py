@@ -1,4 +1,4 @@
-from app import (
+from core import (
     BEDROCK_KNOWLEDGE_BASE_ID,
     TABLE,
     get_selected_docs_for_session,
@@ -11,7 +11,7 @@ from app import (
     response,
     sk_question,
 )
-from qa_kb import ask_knowledge_base
+from .qa_kb import ask_knowledge_base
 from memory_utils import create_memory_event, retrieve_memory_texts
 from tool_contract import run_tool_handler
 

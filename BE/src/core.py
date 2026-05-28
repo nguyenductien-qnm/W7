@@ -57,7 +57,8 @@ def now_epoch():
 
 
 def now_iso():
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Millisecond precision reduces SK collision risk for timestamp-derived keys.
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def cors_headers():
@@ -247,8 +248,16 @@ def pk_user(user_id):
     return f"USER#{user_id}"
 
 
+def pk_email(email):
+    return f"EMAIL#{str(email or '').strip().lower()}"
+
+
 def sk_profile():
     return "PROFILE"
+
+
+def sk_profile_email():
+    return "PROFILE_EMAIL"
 
 
 def sk_doc(doc_id):
@@ -267,16 +276,20 @@ def sk_quiz(doc_id):
     return f"DOC#{doc_id}#QUIZ#LATEST"
 
 
-def sk_question(created_at_iso):
-    return f"QUESTION#{created_at_iso}"
+def _event_suffix(event_id=None):
+    return str(event_id or uuid.uuid4().hex[:10])
 
 
-def sk_summary_history(doc_id, created_at_iso):
-    return f"DOC#{doc_id}#SUMMARY#TS#{created_at_iso}"
+def sk_question(created_at_iso, event_id=None):
+    return f"QUESTION#{created_at_iso}#{_event_suffix(event_id)}"
 
 
-def sk_quiz_history(doc_id, created_at_iso):
-    return f"DOC#{doc_id}#QUIZ#TS#{created_at_iso}"
+def sk_summary_history(doc_id, created_at_iso, event_id=None):
+    return f"DOC#{doc_id}#SUMMARY#TS#{created_at_iso}#{_event_suffix(event_id)}"
+
+
+def sk_quiz_history(doc_id, created_at_iso, event_id=None):
+    return f"DOC#{doc_id}#QUIZ#TS#{created_at_iso}#{_event_suffix(event_id)}"
 
 
 def doc_id_from_sk(sk_value):
@@ -327,33 +340,68 @@ def summary_text_for(title):
 
 
 def ensure_profile(user_id, email):
+    normalized_email = str(email or "").strip().lower()
     profile = TABLE.get_item(Key={"PK": pk_user(user_id), "SK": sk_profile()}).get("Item")
     if profile:
+        if normalized_email:
+            TABLE.put_item(
+                Item={
+                    "PK": pk_email(normalized_email),
+                    "SK": sk_profile_email(),
+                    "user_id": user_id,
+                    "email": normalized_email,
+                    "updated_at": now_iso(),
+                }
+            )
         return profile
 
     item = {
         "PK": pk_user(user_id),
         "SK": sk_profile(),
         "user_id": user_id,
-        "email": email,
+        "email": normalized_email or email,
         "created_at": now_iso(),
     }
     TABLE.put_item(Item=item)
+    if normalized_email:
+        TABLE.put_item(
+            Item={
+                "PK": pk_email(normalized_email),
+                "SK": sk_profile_email(),
+                "user_id": user_id,
+                "email": normalized_email,
+                "created_at": item["created_at"],
+                "updated_at": item["created_at"],
+            }
+        )
     return item
 
 
 def find_profile_by_email(email):
-    if not email:
+    normalized_email = str(email or "").strip().lower()
+    if not normalized_email:
         return None
 
+    email_index = TABLE.get_item(
+        Key={
+            "PK": pk_email(normalized_email),
+            "SK": sk_profile_email(),
+        }
+    ).get("Item")
+    if email_index and email_index.get("user_id"):
+        user_id = str(email_index["user_id"])
+        profile = TABLE.get_item(Key={"PK": pk_user(user_id), "SK": sk_profile()}).get("Item")
+        if profile:
+            return profile
+
     response_data = TABLE.scan(
-        FilterExpression=Attr("SK").eq(sk_profile()) & Attr("email").eq(email)
+        FilterExpression=Attr("SK").eq(sk_profile()) & Attr("email").eq(normalized_email)
     )
     items = response_data.get("Items", [])
 
     while response_data.get("LastEvaluatedKey"):
         response_data = TABLE.scan(
-            FilterExpression=Attr("SK").eq(sk_profile()) & Attr("email").eq(email),
+            FilterExpression=Attr("SK").eq(sk_profile()) & Attr("email").eq(normalized_email),
             ExclusiveStartKey=response_data["LastEvaluatedKey"],
         )
         items.extend(response_data.get("Items", []))
@@ -468,194 +516,7 @@ def ensure_document_ready(user_id, doc_id):
     return updated_doc
 
 
-def handle_login(event):
-    payload = parse_json_body(event)
-    email = payload.get("email", "")
-    profile = find_profile_by_email(email)
-    if not profile:
-        return response(401, {"message": "Invalid email"})
-
-    user_id = profile.get("user_id") or str(profile.get("PK", "")).replace("USER#", "")
-    if not user_id:
-        user_id = DEMO_USER_ID
-
-    return response(
-        200,
-        {
-            "user_id": user_id,
-            "token": "demo-token",
-            "message": "Login success",
-        },
-    )
-
-
-def handle_session_create(event):
-    payload = parse_json_body(event)
-    user_id = get_user_id(event, payload)
-    session_id = str(payload.get("session_id") or f"session_{uuid.uuid4().hex[:10]}")
-    session_name = str(payload.get("session_name") or payload.get("name") or "New Session").strip()
-    ensure_profile(user_id, f"{user_id}@studybot.com")
-    item = ensure_session(user_id, session_id, session_name)
-    if item.get("session_name") != session_name:
-        item = {**item, "session_name": session_name, "updated_at": now_iso()}
-        TABLE.put_item(Item=item)
-    return response(200, {"session": public_session(item)})
-
-
-def handle_session_list(event):
-    user_id = get_user_id(event)
-    return response(200, {"sessions": [public_session(item) for item in list_sessions(user_id)]})
-
-
-def handle_session_delete(event, session_id):
-    user_id = get_user_id(event)
-    if session_id == "default":
-        return response(400, {"message": "The default session cannot be deleted"})
-
-    items = list_user_items(user_id)
-    doc_ids = {
-        item.get("doc_id")
-        for item in items
-        if doc_id_from_sk(item.get("SK", "")) and doc_in_session(item, session_id)
-    }
-    with TABLE.batch_writer() as batch:
-        batch.delete_item(Key={"PK": pk_user(user_id), "SK": sk_session(session_id)})
-        for item in items:
-            sk = item.get("SK", "")
-            if item.get("session_id") == session_id or item.get("doc_id") in doc_ids:
-                batch.delete_item(Key={"PK": pk_user(user_id), "SK": sk})
-
-    return response(200, {"deleted": True, "session_id": session_id})
-
-
-def handle_upload(event):
-    title, user_id, session_id = parse_upload_body(event)
-    ensure_profile(user_id, f"{user_id}@studybot.com")
-    ensure_session(user_id, session_id)
-
-    doc_id = f"doc_{str(now_epoch())[-6:]}"
-    uploaded_at = now_iso()
-
-    doc_item = {
-        "PK": pk_user(user_id),
-        "SK": sk_doc(doc_id),
-        "doc_id": doc_id,
-        "title": title,
-        "s3_key": raw_document_key(user_id, session_id, doc_id, title),
-        "raw_s3_key": raw_document_key(user_id, session_id, doc_id, title),
-        "session_id": session_id,
-        "kb_status": "PROCESSING",
-        "uploaded_at": uploaded_at,
-        "page_count": 40,
-        "concepts": concepts_for(title),
-        "processing_started_at_epoch": now_epoch(),
-    }
-    TABLE.put_item(Item=doc_item)
-
-    return response(200, {"doc_id": doc_id, "session_id": session_id, "status": "PROCESSING", "kb_status": "PROCESSING"})
-
-
-def handle_upload_url(event):
-    if not UPLOADS_BUCKET_NAME:
-        return response(500, {"message": "UPLOADS_BUCKET_NAME is not configured"})
-
-    payload = parse_json_body(event)
-    user_id = get_user_id(event, payload)
-    session_id = get_session_id(event, payload) or "default"
-    filename = safe_filename(payload.get("filename") or payload.get("title") or "uploaded.pdf")
-    content_type = payload.get("content_type") or "application/octet-stream"
-    doc_id = payload.get("doc_id") or f"doc_{uuid.uuid4().hex[:10]}"
-    s3_key = raw_document_key(user_id, session_id, doc_id, filename)
-
-    ensure_profile(user_id, f"{user_id}@studybot.com")
-    ensure_session(user_id, session_id)
-
-    doc_item = {
-        "PK": pk_user(user_id),
-        "SK": sk_doc(doc_id),
-        "doc_id": doc_id,
-        "title": filename,
-        "s3_key": s3_key,
-        "raw_s3_key": s3_key,
-        "session_id": session_id,
-        "kb_status": "UPLOADING",
-        "uploaded_at": now_iso(),
-        "page_count": 0,
-        "concepts": concepts_for(filename),
-    }
-    TABLE.put_item(Item=doc_item)
-
-    upload_url = S3.generate_presigned_url(
-        ClientMethod="put_object",
-        Params={
-            "Bucket": UPLOADS_BUCKET_NAME,
-            "Key": s3_key,
-            "ContentType": content_type,
-        },
-        ExpiresIn=900,
-        HttpMethod="PUT",
-    )
-
-    return response(
-        200,
-        {
-            "doc_id": doc_id,
-            "s3_key": s3_key,
-            "upload_url": upload_url,
-            "upload_method": "PUT",
-            "headers": {"Content-Type": content_type},
-            "complete_path": f"/documents/{doc_id}/complete",
-            "session_id": session_id,
-        },
-    )
-
-
-def handle_upload_complete(event, doc_id):
-    payload = parse_json_body(event)
-    user_id = get_user_id(event, payload)
-    session_id = get_session_id(event, payload) or "default"
-    doc_item = get_doc(user_id, doc_id)
-    if not doc_item:
-        return response(404, {"message": "Document not found"})
-    if not doc_in_session(doc_item, session_id):
-        return response(403, {"message": "Document does not belong to the active session"})
-
-    updated = {
-        **doc_item,
-        "kb_status": "PROCESSING",
-        "processing_started_at_epoch": now_epoch(),
-    }
-
-    ingestion_job_id = f"ing_{uuid.uuid4().hex[:10]}"
-    ingestion_status = "IN_PROGRESS"
-    if use_bedrock_ingestion():
-        # S3 upload completion only means the raw file exists. ProcessPdfLambda
-        # starts KB ingestion after it writes processed text.
-        ingestion_job_id = ""
-        ingestion_status = "WAITING_FOR_PROCESSOR"
-
-    updated["ingestion_job_id"] = ingestion_job_id
-    updated["ingestion_status"] = ingestion_status
-    updated["ingestion_started_at"] = now_iso()
-    TABLE.put_item(Item=updated)
-
-    return response(
-        200,
-        {
-            "doc_id": doc_id,
-            "ingestion_job_id": ingestion_job_id,
-            "ingestion_status": ingestion_status,
-            "status": "PROCESSING",
-            "kb_status": "PROCESSING",
-        },
-    )
-
-
-def handle_documents_list(event):
-    user_id = get_user_id(event)
-    session_id = get_session_id(event) or "default"
-    ensure_session(user_id, session_id)
-
+def collect_session_documents(user_id, session_id):
     docs = []
     for doc in list_documents(user_id):
         if not doc_in_session(doc, session_id):
@@ -678,61 +539,7 @@ def handle_documents_list(event):
         for item in docs
     ]
 
-    return response(200, {"documents": docs, "docs": docs})
-
-
-def handle_document_detail(event, doc_id):
-    user_id = get_user_id(event)
-    session_id = get_session_id(event) or "default"
-
-    doc_item = ensure_document_ready(user_id, doc_id)
-    if not doc_item:
-        return response(404, {"message": "Document not found"})
-    if not doc_in_session(doc_item, session_id):
-        return response(403, {"message": "Document does not belong to the active session"})
-
-    summary_item = get_summary(user_id, doc_id)
-
-    return response(
-        200,
-        {
-            "doc_id": doc_id,
-            "name": doc_item.get("title", "uploaded.pdf"),
-            "title": doc_item.get("title", "uploaded.pdf"),
-            "status": doc_item.get("kb_status", "PROCESSING"),
-            "kb_status": doc_item.get("kb_status", "PROCESSING"),
-            "summary": (summary_item or {}).get("summary", "No summary available yet."),
-            "testable_concepts": (summary_item or {}).get("testable_concepts", []),
-        },
-    )
-
-
-def handle_document_status(event, doc_id):
-    user_id = get_user_id(event)
-    session_id = get_session_id(event) or "default"
-
-    doc_item = ensure_document_ready(user_id, doc_id)
-    if not doc_item:
-        return response(404, {"message": "Document not found"})
-    if not doc_in_session(doc_item, session_id):
-        return response(403, {"message": "Document does not belong to the active session"})
-
-    status = doc_item.get("kb_status", "PROCESSING")
-    normalized = "COMPLETE" if status == "READY" else status
-    return response(
-        200,
-        {
-            "doc_id": doc_id,
-            "status": normalized,
-            "kb_status": status,
-            "document": {
-                "doc_id": doc_id,
-                "filename": doc_item.get("title", "uploaded.pdf"),
-                "status": normalized,
-                "kb_status": status,
-            },
-        },
-    )
+    return docs
 
 
 def normalize_doc_ids(payload):
@@ -789,96 +596,23 @@ def get_selected_docs_for_session(user_id, selected_doc_ids, session_id):
     return selected_docs, None
 
 
-def handle_dashboard(event):
-    query = event.get("queryStringParameters") or {}
-    user_id = query.get("user_id") or DEMO_USER_ID
-
-    items = list_user_items(user_id)
-    documents = [item for item in items if doc_id_from_sk(item.get("SK", ""))]
-    questions = [item for item in items if str(item.get("SK", "")).startswith("QUESTION#")]
-
-    topics = []
-    for doc in documents:
-        for concept in doc.get("concepts", []):
-            if concept not in topics:
-                topics.append(concept)
-
-    return response(
-        200,
-        {
-            "documents_uploaded": len(documents),
-            "questions_asked": len(questions),
-            "topics_studied": topics[:3] or ["CAP theorem", "Replication", "Quorum"],
-        },
-    )
-
-
-def route_request(event):
-    request_context = event.get("requestContext", {})
-    http_info = request_context.get("http", {})
-    method = http_info.get("method") or event.get("httpMethod", "")
-    path = event.get("rawPath") or event.get("path", "")
-
-    if method == "OPTIONS":
-        return {"statusCode": 204, "headers": cors_headers(), "body": ""}
-
-    if method == "POST" and path == "/login":
-        return handle_login(event)
-    if method == "POST" and path == "/session/create":
-        return handle_session_create(event)
-    if method == "GET" and path == "/session/list":
-        return handle_session_list(event)
-    if method == "POST" and path == "/documents/upload-url":
-        return handle_upload_url(event)
-    if method == "POST" and path == "/upload/presign":
-        return handle_upload_url(event)
-    if method == "POST" and path == "/upload":
-        return handle_upload(event)
-    if method == "GET" and path == "/documents":
-        return handle_documents_list(event)
-    if method == "GET" and path == "/docs/list":
-        return handle_documents_list(event)
-    if method == "GET" and path == "/dashboard":
-        return handle_dashboard(event)
-
-    session_delete_match = re.match(r"^/session/([^/]+)$", path)
-    if method == "DELETE" and session_delete_match:
-        return handle_session_delete(event, session_delete_match.group(1))
-
-    detail_match = re.match(r"^/documents/([^/]+)$", path)
-    if method == "GET" and detail_match:
-        return handle_document_detail(event, detail_match.group(1))
-
-    complete_match = re.match(r"^/documents/([^/]+)/complete$", path)
-    if method == "POST" and complete_match:
-        return handle_upload_complete(event, complete_match.group(1))
-
-    status_match = re.match(r"^/documents/([^/]+)/status$", path)
-    if method == "GET" and status_match:
-        return handle_document_status(event, status_match.group(1))
-
-    return response(404, {"message": f"Route not found: {method} {path}"})
-
-
 def lambda_handler(event, _context):
     try:
         if is_tool_event(event):
             name = tool_name_from_event(event, "")
             payload = tool_payload(event)
             if name == "list_documents":
-                api_event = {
-                    "headers": {
-                        "X-User-Id": str(payload.get("user_id") or ""),
-                        "X-Session-Id": str(payload.get("session_id") or "default"),
-                    },
-                    "queryStringParameters": {
-                        "user_id": payload.get("user_id"),
-                        "session_id": payload.get("session_id") or "default",
-                    },
-                }
-                docs_response = handle_documents_list(api_event)
-                return tool_response("list_documents", "success", data=json.loads(docs_response["body"]))
+                user_id = str(payload.get("user_id") or "")
+                session_id = str(payload.get("session_id") or "default")
+                ensure_session(user_id, session_id)
+                docs = collect_session_documents(user_id, session_id)
+                return tool_response("list_documents", "success", data={"documents": docs, "docs": docs})
             return tool_response(name or "unknown", "error", errors=[f"Unsupported app tool: {name}"])
-        return route_request(event)
+        request_context = event.get("requestContext", {})
+        http_info = request_context.get("http", {})
+        method = http_info.get("method") or event.get("httpMethod", "")
+        if method == "OPTIONS":
+            return {"statusCode": 204, "headers": cors_headers(), "body": ""}
+        return response(404, {"message": "This lambda now serves only AgentCore list_documents tool."})
     except Exception as exc:
         return response(500, {"message": "Internal server error", "error": str(exc)})

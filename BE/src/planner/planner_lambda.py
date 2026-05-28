@@ -6,7 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import boto3
 
-from app import (
+from core import (
     TABLE,
     doc_in_session,
     ensure_document_ready,
@@ -39,8 +39,9 @@ def sk_exam_plan(plan_id):
     return f"EXAM_PLAN#{plan_id}"
 
 
-def sk_exam_plan_history(created_at_iso, plan_id):
-    return f"EXAM_PLAN#TS#{created_at_iso}#{plan_id}"
+def sk_exam_plan_history(created_at_iso, plan_id, event_id=None):
+    suffix = str(event_id or uuid.uuid4().hex[:10])
+    return f"EXAM_PLAN#TS#{created_at_iso}#{plan_id}#{suffix}"
 
 
 def _parse_date(value):

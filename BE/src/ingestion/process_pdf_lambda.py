@@ -481,8 +481,10 @@ def delete_processed_objects(bucket, user_id, session_id, doc_id):
 
 def upload_processed_text(bucket, user_id, session_id, doc_id, text):
     processed_root = KB_PROCESSED_PREFIX.rstrip("/")
-    processed_key = f"{processed_root}/{user_id}/{session_id or 'default'}/{doc_id}.txt"
-    delete_processed_objects(bucket, user_id, session_id or "default", doc_id)
+    safe_session_id = session_id or "default"
+    processed_prefix = f"{processed_root}/{user_id}/{safe_session_id}/"
+    processed_key = f"{processed_prefix}{doc_id}.txt"
+    delete_processed_objects(bucket, user_id, safe_session_id, doc_id)
 
     s3.put_object(
         Bucket=bucket,
@@ -493,7 +495,7 @@ def upload_processed_text(bucket, user_id, session_id, doc_id, text):
 
     return {
         "key": processed_key,
-        "prefix": processed_key,
+        "prefix": processed_prefix,
         "size_bytes": len(text.encode("utf-8")),
     }
 

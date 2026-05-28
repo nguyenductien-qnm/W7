@@ -1,4 +1,4 @@
-from app import (
+from core import (
     BEDROCK_KNOWLEDGE_BASE_ID,
     TABLE,
     concepts_for,
@@ -14,7 +14,7 @@ from app import (
     sk_quiz,
     sk_quiz_history,
 )
-from quiz_kb import generate_fallback_quiz, generate_quiz_from_kb
+from .quiz_kb import generate_fallback_quiz, generate_quiz_from_kb
 from tool_contract import run_tool_handler
 
 

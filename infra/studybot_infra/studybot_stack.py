@@ -7,10 +7,17 @@ from aws_cdk import (
 )
 from aws_cdk import aws_apigatewayv2 as apigatewayv2
 from aws_cdk import aws_apigatewayv2_integrations as apigatewayv2_integrations
+from aws_cdk import aws_certificatemanager as acm
+from aws_cdk import aws_cloudfront as cloudfront
+from aws_cdk import aws_cloudfront_origins as origins
 from aws_cdk import aws_dynamodb as dynamodb
+from aws_cdk import aws_ec2 as ec2
 from aws_cdk import aws_iam as iam
 from aws_cdk import aws_lambda as lambda_
+from aws_cdk import aws_route53 as route53
+from aws_cdk import aws_route53_targets as route53_targets
 from aws_cdk import aws_s3 as s3
+from aws_cdk import aws_s3_deployment as s3deploy
 from aws_cdk import aws_s3_notifications as s3n
 from constructs import Construct
 from pathlib import Path
@@ -22,6 +29,8 @@ class StudyBotInfraStack(Stack):
 
         uploads_bucket_name = "studybotdatastack-uploadbucketd2c1da78-2cpeowy02vjk"
         documents_table_name = "StudyBotDocuments"
+        root_domain_name = "nguyenductien.cloud"
+        api_domain_name = f"api.{root_domain_name}"
         vector_index_arn = (
             "arn:aws:s3vectors:ap-southeast-1:589077667575:bucket/"
             "studybot-vectors-589077667575-ap-southeast-1/index/studybot-kb-index"
@@ -71,6 +80,101 @@ class StudyBotInfraStack(Stack):
             "StudyBotDocuments",
             table_name=documents_table_name,
         )
+        hosted_zone = route53.HostedZone.from_lookup(
+            self,
+            "StudyBotHostedZone",
+            domain_name=root_domain_name,
+        )
+
+        frontend_bucket = s3.Bucket(
+            self,
+            "StudyBotFrontendBucket",
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            encryption=s3.BucketEncryption.S3_MANAGED,
+            versioned=False,
+            enforce_ssl=True,
+        )
+
+        studybot_vpc = ec2.Vpc(
+            self,
+            "StudyBotVpc",
+            nat_gateways=0,
+            max_azs=2,
+            subnet_configuration=[
+                ec2.SubnetConfiguration(
+                    name="private-isolated",
+                    subnet_type=ec2.SubnetType.PRIVATE_ISOLATED,
+                    cidr_mask=24,
+                ),
+            ],
+        )
+
+        lambda_sg = ec2.SecurityGroup(
+            self,
+            "StudyBotLambdaSecurityGroup",
+            vpc=studybot_vpc,
+            description="Security group for StudyBot Lambdas in private subnets",
+            allow_all_outbound=True,
+        )
+
+        endpoint_sg = ec2.SecurityGroup(
+            self,
+            "StudyBotEndpointSecurityGroup",
+            vpc=studybot_vpc,
+            description="Security group for VPC interface endpoints",
+            allow_all_outbound=True,
+        )
+        endpoint_sg.add_ingress_rule(
+            lambda_sg,
+            ec2.Port.tcp(443),
+            "Allow HTTPS from Lambda SG to interface endpoints",
+        )
+
+        isolated_subnets = ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_ISOLATED)
+        lambda_network_config = {
+            "vpc": studybot_vpc,
+            "vpc_subnets": isolated_subnets,
+            "security_groups": [lambda_sg],
+        }
+
+        studybot_vpc.add_gateway_endpoint(
+            "StudyBotS3GatewayEndpoint",
+            service=ec2.GatewayVpcEndpointAwsService.S3,
+            subnets=[isolated_subnets],
+        )
+        studybot_vpc.add_gateway_endpoint(
+            "StudyBotDynamoDbGatewayEndpoint",
+            service=ec2.GatewayVpcEndpointAwsService.DYNAMODB,
+            subnets=[isolated_subnets],
+        )
+
+        def add_interface_endpoint(logical_id: str, service_name: str):
+            return ec2.InterfaceVpcEndpoint(
+                self,
+                logical_id,
+                vpc=studybot_vpc,
+                service=ec2.InterfaceVpcEndpointService(service_name, 443),
+                subnets=isolated_subnets,
+                security_groups=[endpoint_sg],
+                private_dns_enabled=True,
+            )
+
+        add_interface_endpoint(
+            "StudyBotBedrockRuntimeEndpoint",
+            f"com.amazonaws.{self.region}.bedrock-runtime",
+        )
+        add_interface_endpoint(
+            "StudyBotBedrockAgentRuntimeEndpoint",
+            f"com.amazonaws.{self.region}.bedrock-agent-runtime",
+        )
+        add_interface_endpoint(
+            "StudyBotBedrockAgentEndpoint",
+            f"com.amazonaws.{self.region}.bedrock-agent",
+        )
+        add_interface_endpoint(
+            "StudyBotTextractEndpoint",
+            f"com.amazonaws.{self.region}.textract",
+        )
 
         backend_src_path = str(Path(__file__).resolve().parents[2] / "BE" / "src")
         backend_lambda_code = lambda_.Code.from_asset(
@@ -97,14 +201,15 @@ class StudyBotInfraStack(Stack):
             },
         )
 
-        api_lambda = lambda_.Function(
+        login_lambda = lambda_.Function(
             self,
-            "StudyBotApiLambda",
+            "StudyBotLoginLambda",
             runtime=lambda_.Runtime.PYTHON_3_12,
-            handler="app.lambda_handler",
+            handler="auth.login_lambda.lambda_handler",
             code=backend_lambda_code,
             timeout=Duration.seconds(30),
             memory_size=512,
+            **lambda_network_config,
             environment={
                 "DOCUMENTS_TABLE": documents_table.table_name,
                 "INGESTION_MODE": "bedrock",
@@ -115,7 +220,63 @@ class StudyBotInfraStack(Stack):
                 "VECTOR_INDEX_ARN": vector_index_arn,
             },
         )
-
+        sessions_lambda = lambda_.Function(
+            self,
+            "StudyBotSessionsLambda",
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            handler="session.sessions_lambda.lambda_handler",
+            code=backend_lambda_code,
+            timeout=Duration.seconds(30),
+            memory_size=512,
+            **lambda_network_config,
+            environment={
+                "DOCUMENTS_TABLE": documents_table.table_name,
+                "INGESTION_MODE": "bedrock",
+                "UPLOADS_BUCKET_NAME": uploads_bucket_name,
+                "BEDROCK_KNOWLEDGE_BASE_ID": knowledge_base_id,
+                "BEDROCK_DATA_SOURCE_ID": data_source_id,
+                "BEDROCK_GENERATION_MODEL_ID": generation_model_id,
+                "VECTOR_INDEX_ARN": vector_index_arn,
+            },
+        )
+        upload_lambda = lambda_.Function(
+            self,
+            "StudyBotUploadLambda",
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            handler="upload.upload_lambda.lambda_handler",
+            code=backend_lambda_code,
+            timeout=Duration.seconds(30),
+            memory_size=512,
+            **lambda_network_config,
+            environment={
+                "DOCUMENTS_TABLE": documents_table.table_name,
+                "INGESTION_MODE": "bedrock",
+                "UPLOADS_BUCKET_NAME": uploads_bucket_name,
+                "BEDROCK_KNOWLEDGE_BASE_ID": knowledge_base_id,
+                "BEDROCK_DATA_SOURCE_ID": data_source_id,
+                "BEDROCK_GENERATION_MODEL_ID": generation_model_id,
+                "VECTOR_INDEX_ARN": vector_index_arn,
+            },
+        )
+        documents_lambda = lambda_.Function(
+            self,
+            "StudyBotDocumentsLambda",
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            handler="documents.documents_lambda.lambda_handler",
+            code=backend_lambda_code,
+            timeout=Duration.seconds(30),
+            memory_size=512,
+            **lambda_network_config,
+            environment={
+                "DOCUMENTS_TABLE": documents_table.table_name,
+                "INGESTION_MODE": "bedrock",
+                "UPLOADS_BUCKET_NAME": uploads_bucket_name,
+                "BEDROCK_KNOWLEDGE_BASE_ID": knowledge_base_id,
+                "BEDROCK_DATA_SOURCE_ID": data_source_id,
+                "BEDROCK_GENERATION_MODEL_ID": generation_model_id,
+                "VECTOR_INDEX_ARN": vector_index_arn,
+            },
+        )
         ai_lambda_environment = {
             "DOCUMENTS_TABLE": documents_table.table_name,
             "INGESTION_MODE": "bedrock",
@@ -131,50 +292,55 @@ class StudyBotInfraStack(Stack):
             self,
             "StudyBotQaLambda",
             runtime=lambda_.Runtime.PYTHON_3_12,
-            handler="qa_lambda.lambda_handler",
+            handler="qa.qa_lambda.lambda_handler",
             code=backend_lambda_code,
             timeout=Duration.seconds(60),
             memory_size=512,
+            **lambda_network_config,
             environment=ai_lambda_environment,
         )
         summary_lambda = lambda_.Function(
             self,
             "StudyBotSummaryLambda",
             runtime=lambda_.Runtime.PYTHON_3_12,
-            handler="summary_lambda.lambda_handler",
+            handler="summary.summary_lambda.lambda_handler",
             code=backend_lambda_code,
             timeout=Duration.seconds(60),
             memory_size=512,
+            **lambda_network_config,
             environment=ai_lambda_environment,
         )
         quiz_lambda = lambda_.Function(
             self,
             "StudyBotQuizLambda",
             runtime=lambda_.Runtime.PYTHON_3_12,
-            handler="quiz_lambda.lambda_handler",
+            handler="quiz.quiz_lambda.lambda_handler",
             code=backend_lambda_code,
             timeout=Duration.seconds(60),
             memory_size=512,
+            **lambda_network_config,
             environment=ai_lambda_environment,
         )
         planner_lambda = lambda_.Function(
             self,
             "StudyBotPlannerLambda",
             runtime=lambda_.Runtime.PYTHON_3_12,
-            handler="planner_lambda.lambda_handler",
+            handler="planner.planner_lambda.lambda_handler",
             code=backend_lambda_code,
             timeout=Duration.seconds(60),
             memory_size=512,
+            **lambda_network_config,
             environment=ai_lambda_environment,
         )
         history_lambda = lambda_.Function(
             self,
             "StudyBotHistoryLambda",
             runtime=lambda_.Runtime.PYTHON_3_12,
-            handler="history_lambda.lambda_handler",
+            handler="history.history_lambda.lambda_handler",
             code=backend_lambda_code,
             timeout=Duration.seconds(30),
             memory_size=512,
+            **lambda_network_config,
             environment=ai_lambda_environment,
         )
 
@@ -182,10 +348,11 @@ class StudyBotInfraStack(Stack):
             self,
             "ProcessPdfLambda",
             runtime=lambda_.Runtime.PYTHON_3_12,
-            handler="process_pdf_lambda.lambda_handler",
+            handler="ingestion.process_pdf_lambda.lambda_handler",
             code=backend_lambda_code,
             timeout=Duration.minutes(5),
             memory_size=1024,
+            **lambda_network_config,
             environment={
                 "DOCUMENTS_TABLE": documents_table.table_name,
                 "UPLOADS_BUCKET_NAME": uploads_bucket_name,
@@ -196,21 +363,78 @@ class StudyBotInfraStack(Stack):
             },
         )
 
-        documents_table.grant_read_write_data(api_lambda)
-        documents_table.grant_read_write_data(qa_lambda)
-        documents_table.grant_read_write_data(summary_lambda)
-        documents_table.grant_read_write_data(quiz_lambda)
-        documents_table.grant_read_write_data(planner_lambda)
-        documents_table.grant_read_data(history_lambda)
-        documents_table.grant_read_write_data(process_pdf_lambda)
-        uploads_bucket.grant_put(api_lambda)
-        uploads_bucket.grant_read(summary_lambda)
-        uploads_bucket.grant_read_write(process_pdf_lambda)
+        table_arn = documents_table.table_arn
 
-        api_lambda.add_to_role_policy(
+        def add_ddb_policy(target_lambda: lambda_.Function, actions: list[str]):
+            target_lambda.add_to_role_policy(
+                iam.PolicyStatement(
+                    actions=actions,
+                    resources=[table_arn],
+                )
+            )
+
+        add_ddb_policy(login_lambda, ["dynamodb:GetItem", "dynamodb:Scan"])
+        add_ddb_policy(
+            sessions_lambda,
+            ["dynamodb:GetItem", "dynamodb:Query", "dynamodb:PutItem", "dynamodb:BatchWriteItem"],
+        )
+        add_ddb_policy(upload_lambda, ["dynamodb:GetItem", "dynamodb:PutItem"])
+        add_ddb_policy(documents_lambda, ["dynamodb:GetItem", "dynamodb:Query", "dynamodb:PutItem"])
+        add_ddb_policy(qa_lambda, ["dynamodb:GetItem", "dynamodb:Query", "dynamodb:PutItem"])
+        add_ddb_policy(summary_lambda, ["dynamodb:GetItem", "dynamodb:Query", "dynamodb:PutItem"])
+        add_ddb_policy(quiz_lambda, ["dynamodb:GetItem", "dynamodb:Query", "dynamodb:PutItem"])
+        add_ddb_policy(
+            planner_lambda,
+            ["dynamodb:GetItem", "dynamodb:Query", "dynamodb:PutItem", "dynamodb:BatchWriteItem"],
+        )
+        add_ddb_policy(history_lambda, ["dynamodb:Query"])
+        add_ddb_policy(process_pdf_lambda, ["dynamodb:GetItem", "dynamodb:PutItem"])
+
+        upload_lambda.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["s3:PutObject"],
+                resources=[
+                    f"arn:aws:s3:::{uploads_bucket_name}/raw/*",
+                    f"arn:aws:s3:::{uploads_bucket_name}/documents/raw/*",
+                ],
+            )
+        )
+        summary_lambda.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["s3:GetObject"],
+                resources=[
+                    f"arn:aws:s3:::{uploads_bucket_name}/processed/*",
+                    f"arn:aws:s3:::{uploads_bucket_name}/documents/processed/*",
+                ],
+            )
+        )
+        process_pdf_lambda.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["s3:GetObject"],
+                resources=[
+                    f"arn:aws:s3:::{uploads_bucket_name}/raw/*",
+                    f"arn:aws:s3:::{uploads_bucket_name}/documents/raw/*",
+                ],
+            )
+        )
+        process_pdf_lambda.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["s3:PutObject", "s3:DeleteObject"],
+                resources=[
+                    f"arn:aws:s3:::{uploads_bucket_name}/processed/*",
+                    f"arn:aws:s3:::{uploads_bucket_name}/documents/processed/*",
+                ],
+            )
+        )
+        process_pdf_lambda.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["s3:ListBucket"],
+                resources=[f"arn:aws:s3:::{uploads_bucket_name}"],
+            )
+        )
+        documents_lambda.add_to_role_policy(
             iam.PolicyStatement(
                 actions=[
-                    "bedrock:StartIngestionJob",
                     "bedrock:GetIngestionJob",
                 ],
                 resources=[kb_arn, data_source_arn],
@@ -286,9 +510,21 @@ class StudyBotInfraStack(Stack):
                 ],
             ),
         )
-        api_integration = apigatewayv2_integrations.HttpLambdaIntegration(
-            "StudyBotApiLambdaIntegration",
-            api_lambda,
+        login_integration = apigatewayv2_integrations.HttpLambdaIntegration(
+            "StudyBotLoginLambdaIntegration",
+            login_lambda,
+        )
+        sessions_integration = apigatewayv2_integrations.HttpLambdaIntegration(
+            "StudyBotSessionsLambdaIntegration",
+            sessions_lambda,
+        )
+        upload_integration = apigatewayv2_integrations.HttpLambdaIntegration(
+            "StudyBotUploadLambdaIntegration",
+            upload_lambda,
+        )
+        documents_integration = apigatewayv2_integrations.HttpLambdaIntegration(
+            "StudyBotDocumentsLambdaIntegration",
+            documents_lambda,
         )
         qa_integration = apigatewayv2_integrations.HttpLambdaIntegration(
             "StudyBotQaLambdaIntegration",
@@ -309,6 +545,51 @@ class StudyBotInfraStack(Stack):
         history_integration = apigatewayv2_integrations.HttpLambdaIntegration(
             "StudyBotHistoryLambdaIntegration",
             history_lambda,
+        )
+        http_api.add_routes(
+            path="/login",
+            methods=[apigatewayv2.HttpMethod.POST],
+            integration=login_integration,
+        )
+        http_api.add_routes(
+            path="/session/create",
+            methods=[apigatewayv2.HttpMethod.POST],
+            integration=sessions_integration,
+        )
+        http_api.add_routes(
+            path="/session/list",
+            methods=[apigatewayv2.HttpMethod.GET],
+            integration=sessions_integration,
+        )
+        http_api.add_routes(
+            path="/session/{session_id}",
+            methods=[apigatewayv2.HttpMethod.DELETE],
+            integration=sessions_integration,
+        )
+        http_api.add_routes(
+            path="/documents/upload-url",
+            methods=[apigatewayv2.HttpMethod.POST],
+            integration=upload_integration,
+        )
+        http_api.add_routes(
+            path="/upload/presign",
+            methods=[apigatewayv2.HttpMethod.POST],
+            integration=upload_integration,
+        )
+        http_api.add_routes(
+            path="/upload",
+            methods=[apigatewayv2.HttpMethod.POST],
+            integration=upload_integration,
+        )
+        http_api.add_routes(
+            path="/documents/{doc_id}/complete",
+            methods=[apigatewayv2.HttpMethod.POST],
+            integration=upload_integration,
+        )
+        http_api.add_routes(
+            path="/docs/list",
+            methods=[apigatewayv2.HttpMethod.GET],
+            integration=documents_integration,
         )
         http_api.add_routes(
             path="/ask",
@@ -351,12 +632,132 @@ class StudyBotInfraStack(Stack):
             integration=history_integration,
         )
 
+        api_certificate = acm.Certificate(
+            self,
+            "StudyBotApiCertificate",
+            domain_name=api_domain_name,
+            validation=acm.CertificateValidation.from_dns(hosted_zone),
+        )
+        api_custom_domain = apigatewayv2.DomainName(
+            self,
+            "StudyBotApiCustomDomain",
+            domain_name=api_domain_name,
+            certificate=api_certificate,
+        )
+        apigatewayv2.ApiMapping(
+            self,
+            "StudyBotApiMapping",
+            api=http_api,
+            domain_name=api_custom_domain,
+            stage=http_api.default_stage,
+        )
+        route53.ARecord(
+            self,
+            "StudyBotApiAliasRecord",
+            zone=hosted_zone,
+            record_name="api",
+            target=route53.RecordTarget.from_alias(
+                route53_targets.ApiGatewayv2DomainProperties(
+                    api_custom_domain.regional_domain_name,
+                    api_custom_domain.regional_hosted_zone_id,
+                )
+            ),
+        )
+        route53.AaaaRecord(
+            self,
+            "StudyBotApiAliasRecordIpv6",
+            zone=hosted_zone,
+            record_name="api",
+            target=route53.RecordTarget.from_alias(
+                route53_targets.ApiGatewayv2DomainProperties(
+                    api_custom_domain.regional_domain_name,
+                    api_custom_domain.regional_hosted_zone_id,
+                )
+            ),
+        )
+
+        frontend_certificate = acm.DnsValidatedCertificate(
+            self,
+            "StudyBotFrontendCertificate",
+            hosted_zone=hosted_zone,
+            domain_name=root_domain_name,
+            subject_alternative_names=[f"www.{root_domain_name}"],
+            region="us-east-1",
+        )
+        frontend_distribution = cloudfront.Distribution(
+            self,
+            "StudyBotFrontendDistribution",
+            default_behavior=cloudfront.BehaviorOptions(
+                origin=origins.S3Origin(frontend_bucket),
+                viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+                allowed_methods=cloudfront.AllowedMethods.ALLOW_GET_HEAD_OPTIONS,
+                cache_policy=cloudfront.CachePolicy.CACHING_OPTIMIZED,
+            ),
+            default_root_object="index.html",
+            domain_names=[root_domain_name, f"www.{root_domain_name}"],
+            certificate=frontend_certificate,
+            error_responses=[
+                cloudfront.ErrorResponse(
+                    http_status=403,
+                    response_http_status=200,
+                    response_page_path="/index.html",
+                    ttl=Duration.seconds(30),
+                ),
+                cloudfront.ErrorResponse(
+                    http_status=404,
+                    response_http_status=200,
+                    response_page_path="/index.html",
+                    ttl=Duration.seconds(30),
+                ),
+            ],
+        )
+
+        frontend_dist_path = str(Path(__file__).resolve().parents[2] / "FE" / "dist")
+        s3deploy.BucketDeployment(
+            self,
+            "StudyBotFrontendDeployment",
+            destination_bucket=frontend_bucket,
+            sources=[s3deploy.Source.asset(frontend_dist_path)],
+            distribution=frontend_distribution,
+            distribution_paths=["/*"],
+            prune=True,
+            retain_on_delete=False,
+        )
+        route53.ARecord(
+            self,
+            "StudyBotFrontendAliasRootA",
+            zone=hosted_zone,
+            record_name=root_domain_name,
+            target=route53.RecordTarget.from_alias(route53_targets.CloudFrontTarget(frontend_distribution)),
+        )
+        route53.AaaaRecord(
+            self,
+            "StudyBotFrontendAliasRootAAAA",
+            zone=hosted_zone,
+            record_name=root_domain_name,
+            target=route53.RecordTarget.from_alias(route53_targets.CloudFrontTarget(frontend_distribution)),
+        )
+        route53.ARecord(
+            self,
+            "StudyBotFrontendAliasWwwA",
+            zone=hosted_zone,
+            record_name=f"www.{root_domain_name}",
+            target=route53.RecordTarget.from_alias(route53_targets.CloudFrontTarget(frontend_distribution)),
+        )
+        route53.AaaaRecord(
+            self,
+            "StudyBotFrontendAliasWwwAAAA",
+            zone=hosted_zone,
+            record_name=f"www.{root_domain_name}",
+            target=route53.RecordTarget.from_alias(route53_targets.CloudFrontTarget(frontend_distribution)),
+        )
+
         gateway_role = iam.Role(
             self,
             "StudyBotAgentCoreGatewayRole",
             assumed_by=iam.ServicePrincipal("bedrock-agentcore.amazonaws.com"),
         )
-        for target_lambda in [api_lambda, qa_lambda, summary_lambda, quiz_lambda, planner_lambda, history_lambda]:
+        for target_lambda in [qa_lambda, summary_lambda, quiz_lambda, planner_lambda, history_lambda]:
             target_lambda.grant_invoke(gateway_role)
             target_lambda.add_permission(
                 f"AgentCoreInvoke{target_lambda.node.id}",
@@ -445,13 +846,6 @@ class StudyBotInfraStack(Stack):
             )
 
         add_agentcore_lambda_target(
-            "StudyBotAppToolsTarget",
-            "studybot-app-tools",
-            "Document listing tools.",
-            api_lambda,
-            [("list_documents", "List documents in the active study session.")],
-        )
-        add_agentcore_lambda_target(
             "StudyBotQaToolsTarget",
             "studybot-qa-tools",
             "Question answering tools.",
@@ -492,24 +886,20 @@ class StudyBotInfraStack(Stack):
             history_lambda,
             [("get_history", "Get UI history for the active study session.")],
         )
-        http_api.add_routes(
-            path="/{proxy+}",
-            methods=[apigatewayv2.HttpMethod.ANY],
-            integration=api_integration,
-        )
-        http_api.add_routes(
-            path="/",
-            methods=[apigatewayv2.HttpMethod.ANY],
-            integration=api_integration,
-        )
-
         CfnOutput(self, "UploadsBucketName", value=uploads_bucket.bucket_name)
         CfnOutput(self, "DocumentsTableName", value=documents_table.table_name)
         CfnOutput(self, "VectorIndexArn", value=vector_index_arn)
         CfnOutput(self, "KnowledgeBaseId", value=knowledge_base_id)
         CfnOutput(self, "DataSourceId", value=data_source_id)
         CfnOutput(self, "HttpApiUrl", value=http_api.api_endpoint)
-        CfnOutput(self, "ApiLambdaName", value=api_lambda.function_name)
+        CfnOutput(self, "ApiCustomDomain", value=api_domain_name)
+        CfnOutput(self, "FrontendBucketName", value=frontend_bucket.bucket_name)
+        CfnOutput(self, "FrontendCloudFrontDomain", value=frontend_distribution.domain_name)
+        CfnOutput(self, "FrontendCustomDomain", value=root_domain_name)
+        CfnOutput(self, "LoginLambdaName", value=login_lambda.function_name)
+        CfnOutput(self, "SessionsLambdaName", value=sessions_lambda.function_name)
+        CfnOutput(self, "UploadLambdaName", value=upload_lambda.function_name)
+        CfnOutput(self, "DocumentsLambdaName", value=documents_lambda.function_name)
         CfnOutput(self, "ProcessPdfLambdaName", value=process_pdf_lambda.function_name)
         CfnOutput(self, "QaLambdaName", value=qa_lambda.function_name)
         CfnOutput(self, "SummaryLambdaName", value=summary_lambda.function_name)
@@ -518,3 +908,4 @@ class StudyBotInfraStack(Stack):
         CfnOutput(self, "HistoryLambdaName", value=history_lambda.function_name)
         CfnOutput(self, "AgentCoreGatewayId", value=agentcore_gateway.ref)
         CfnOutput(self, "AgentCoreGatewayUrl", value=agentcore_gateway.get_att("GatewayUrl").to_string())
+        CfnOutput(self, "VpcId", value=studybot_vpc.vpc_id)

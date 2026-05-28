@@ -42,11 +42,11 @@ Resources:
         - AttributeName: SK
           KeyType: RANGE
 
-  StudyBotFunction:
+  LoginFunction:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: src/
-      Handler: app.lambda_handler
+      Handler: auth.login_lambda.lambda_handler
       Environment:
         Variables:
           DOCUMENTS_TABLE: !Ref DocumentsTable
@@ -56,7 +56,68 @@ Resources:
           BEDROCK_DATA_SOURCE_ID: V0ISBKEMXT
           BEDROCK_GENERATION_MODEL_ID: global.amazon.nova-2-lite-v1:0
           VECTOR_INDEX_ARN: arn:aws:s3vectors:ap-southeast-1:589077667575:bucket/studybot-vectors-589077667575-ap-southeast-1/index/studybot-kb-index
-          KB_PROCESSED_PREFIX: processed
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DocumentsTable
+      Events:
+        LoginApi:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref StudyBotApi
+            Path: /login
+            Method: POST
+
+  SessionsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: session.sessions_lambda.lambda_handler
+      Environment:
+        Variables:
+          DOCUMENTS_TABLE: !Ref DocumentsTable
+          INGESTION_MODE: mock
+          UPLOADS_BUCKET_NAME: studybotdatastack-uploadbucketd2c1da78-2cpeowy02vjk
+          BEDROCK_KNOWLEDGE_BASE_ID: LI32IWLOB5
+          BEDROCK_DATA_SOURCE_ID: V0ISBKEMXT
+          BEDROCK_GENERATION_MODEL_ID: global.amazon.nova-2-lite-v1:0
+          VECTOR_INDEX_ARN: arn:aws:s3vectors:ap-southeast-1:589077667575:bucket/studybot-vectors-589077667575-ap-southeast-1/index/studybot-kb-index
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DocumentsTable
+      Events:
+        SessionCreateApi:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref StudyBotApi
+            Path: /session/create
+            Method: POST
+        SessionListApi:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref StudyBotApi
+            Path: /session/list
+            Method: GET
+        SessionDeleteApi:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref StudyBotApi
+            Path: /session/{session_id}
+            Method: DELETE
+
+  UploadFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: upload.upload_lambda.lambda_handler
+      Environment:
+        Variables:
+          DOCUMENTS_TABLE: !Ref DocumentsTable
+          INGESTION_MODE: mock
+          UPLOADS_BUCKET_NAME: studybotdatastack-uploadbucketd2c1da78-2cpeowy02vjk
+          BEDROCK_KNOWLEDGE_BASE_ID: LI32IWLOB5
+          BEDROCK_DATA_SOURCE_ID: V0ISBKEMXT
+          BEDROCK_GENERATION_MODEL_ID: global.amazon.nova-2-lite-v1:0
+          VECTOR_INDEX_ARN: arn:aws:s3vectors:ap-southeast-1:589077667575:bucket/studybot-vectors-589077667575-ap-southeast-1/index/studybot-kb-index
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref DocumentsTable
@@ -67,27 +128,7 @@ Resources:
               Resource:
                 - arn:aws:s3:::studybotdatastack-uploadbucketd2c1da78-2cpeowy02vjk/raw/*
                 - arn:aws:s3:::studybotdatastack-uploadbucketd2c1da78-2cpeowy02vjk/documents/*
-            - Effect: Allow
-              Action:
-                - bedrock:StartIngestionJob
-                - bedrock:GetIngestionJob
-                - bedrock:Retrieve
-              Resource:
-                - arn:aws:bedrock:ap-southeast-1:589077667575:knowledge-base/LI32IWLOB5
-                - arn:aws:bedrock:ap-southeast-1:589077667575:knowledge-base/LI32IWLOB5/data-source/V0ISBKEMXT
-            - Effect: Allow
-              Action:
-                - bedrock:InvokeModel
-              Resource:
-                - arn:aws:bedrock:ap-southeast-1:589077667575:inference-profile/global.amazon.nova-2-lite-v1:0
-                - arn:aws:bedrock:*::foundation-model/amazon.nova-2-lite-v1:0
       Events:
-        LoginApi:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref StudyBotApi
-            Path: /login
-            Method: POST
         UploadApi:
           Type: HttpApi
           Properties:
@@ -106,48 +147,50 @@ Resources:
             ApiId: !Ref StudyBotApi
             Path: /documents/upload-url
             Method: POST
-        DocumentsListApi:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref StudyBotApi
-            Path: /documents
-            Method: GET
-        DocsListAliasApi:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref StudyBotApi
-            Path: /docs/list
-            Method: GET
-        DocumentDetailApi:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref StudyBotApi
-            Path: /documents/{doc_id}
-            Method: GET
         DocumentCompleteApi:
           Type: HttpApi
           Properties:
             ApiId: !Ref StudyBotApi
             Path: /documents/{doc_id}/complete
             Method: POST
-        DocumentStatusApi:
+
+  DocumentsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: documents.documents_lambda.lambda_handler
+      Environment:
+        Variables:
+          DOCUMENTS_TABLE: !Ref DocumentsTable
+          INGESTION_MODE: mock
+          UPLOADS_BUCKET_NAME: studybotdatastack-uploadbucketd2c1da78-2cpeowy02vjk
+          BEDROCK_KNOWLEDGE_BASE_ID: LI32IWLOB5
+          BEDROCK_DATA_SOURCE_ID: V0ISBKEMXT
+          BEDROCK_GENERATION_MODEL_ID: global.amazon.nova-2-lite-v1:0
+          VECTOR_INDEX_ARN: arn:aws:s3vectors:ap-southeast-1:589077667575:bucket/studybot-vectors-589077667575-ap-southeast-1/index/studybot-kb-index
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DocumentsTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:GetIngestionJob
+              Resource:
+                - arn:aws:bedrock:ap-southeast-1:589077667575:knowledge-base/LI32IWLOB5
+                - arn:aws:bedrock:ap-southeast-1:589077667575:knowledge-base/LI32IWLOB5/data-source/V0ISBKEMXT
+      Events:
+        DocsListAliasApi:
           Type: HttpApi
           Properties:
             ApiId: !Ref StudyBotApi
-            Path: /documents/{doc_id}/status
-            Method: GET
-        DashboardApi:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref StudyBotApi
-            Path: /dashboard
+            Path: /docs/list
             Method: GET
 
   QaFunction:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: src/
-      Handler: qa_lambda.lambda_handler
+      Handler: qa.qa_lambda.lambda_handler
       Timeout: 60
       Environment:
         Variables:
@@ -192,7 +235,7 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: src/
-      Handler: summary_lambda.lambda_handler
+      Handler: summary.summary_lambda.lambda_handler
       Timeout: 60
       Environment:
         Variables:
@@ -236,7 +279,7 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: src/
-      Handler: quiz_lambda.lambda_handler
+      Handler: quiz.quiz_lambda.lambda_handler
       Timeout: 60
       Environment:
         Variables:
@@ -273,7 +316,7 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: src/
-      Handler: planner_lambda.lambda_handler
+      Handler: planner.planner_lambda.lambda_handler
       Timeout: 60
       Environment:
         Variables:
@@ -353,7 +396,7 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: src/
-      Handler: history_lambda.lambda_handler
+      Handler: history.history_lambda.lambda_handler
       Timeout: 30
       Environment:
         Variables:

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
-const DEFAULT_API_BASE = "https://3sgavxe4c0.execute-api.ap-southeast-1.amazonaws.com";
+const DEFAULT_API_BASE = "https://api.nguyenductien.cloud";
 const LOCAL_USER = new URLSearchParams(window.location.search).get("user") || "test-user-001";
 const API_BASE = (
   new URLSearchParams(window.location.search).get("api") || DEFAULT_API_BASE

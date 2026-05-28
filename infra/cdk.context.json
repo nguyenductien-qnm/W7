@@ -1,0 +1,11 @@
+{
+  "hosted-zone:account=589077667575:domainName=nguyenductien.cloud:region=ap-southeast-1": {
+    "Id": "/hostedzone/Z0578804S13KUOL254GI",
+    "Name": "nguyenductien.cloud."
+  },
+  "availability-zones:account=589077667575:region=ap-southeast-1": [
+    "ap-southeast-1a",
+    "ap-southeast-1b",
+    "ap-southeast-1c"
+  ]
+}
