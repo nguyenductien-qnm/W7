@@ -133,29 +133,151 @@ Resources:
             ApiId: !Ref StudyBotApi
             Path: /documents/{doc_id}/status
             Method: GET
+        DashboardApi:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref StudyBotApi
+            Path: /dashboard
+            Method: GET
+
+  QaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: qa_lambda.lambda_handler
+      Timeout: 60
+      Environment:
+        Variables:
+          DOCUMENTS_TABLE: !Ref DocumentsTable
+          AWS_REGION: ap-southeast-1
+          INGESTION_MODE: mock
+          BEDROCK_KNOWLEDGE_BASE_ID: LI32IWLOB5
+          BEDROCK_DATA_SOURCE_ID: V0ISBKEMXT
+          BEDROCK_GENERATION_MODEL_ID: global.amazon.nova-2-lite-v1:0
+          VECTOR_INDEX_ARN: arn:aws:s3vectors:ap-southeast-1:589077667575:bucket/studybot-vectors-589077667575-ap-southeast-1/index/studybot-kb-index
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DocumentsTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:Retrieve
+              Resource:
+                - arn:aws:bedrock:ap-southeast-1:589077667575:knowledge-base/LI32IWLOB5
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource:
+                - arn:aws:bedrock:ap-southeast-1:589077667575:inference-profile/global.amazon.nova-2-lite-v1:0
+                - arn:aws:bedrock:*::foundation-model/amazon.nova-2-lite-v1:0
+      Events:
         AskApi:
           Type: HttpApi
           Properties:
             ApiId: !Ref StudyBotApi
             Path: /ask
             Method: POST
+
+  SummaryFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: summary_lambda.lambda_handler
+      Timeout: 60
+      Environment:
+        Variables:
+          DOCUMENTS_TABLE: !Ref DocumentsTable
+          AWS_REGION: ap-southeast-1
+          INGESTION_MODE: mock
+          BEDROCK_KNOWLEDGE_BASE_ID: LI32IWLOB5
+          BEDROCK_DATA_SOURCE_ID: V0ISBKEMXT
+          BEDROCK_GENERATION_MODEL_ID: global.amazon.nova-2-lite-v1:0
+          VECTOR_INDEX_ARN: arn:aws:s3vectors:ap-southeast-1:589077667575:bucket/studybot-vectors-589077667575-ap-southeast-1/index/studybot-kb-index
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DocumentsTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:Retrieve
+              Resource:
+                - arn:aws:bedrock:ap-southeast-1:589077667575:knowledge-base/LI32IWLOB5
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource:
+                - arn:aws:bedrock:ap-southeast-1:589077667575:inference-profile/global.amazon.nova-2-lite-v1:0
+                - arn:aws:bedrock:*::foundation-model/amazon.nova-2-lite-v1:0
+      Events:
         SummaryApi:
           Type: HttpApi
           Properties:
             ApiId: !Ref StudyBotApi
             Path: /summary
             Method: POST
+
+  QuizFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: quiz_lambda.lambda_handler
+      Timeout: 60
+      Environment:
+        Variables:
+          DOCUMENTS_TABLE: !Ref DocumentsTable
+          AWS_REGION: ap-southeast-1
+          INGESTION_MODE: mock
+          BEDROCK_KNOWLEDGE_BASE_ID: LI32IWLOB5
+          BEDROCK_DATA_SOURCE_ID: V0ISBKEMXT
+          BEDROCK_GENERATION_MODEL_ID: global.amazon.nova-2-lite-v1:0
+          VECTOR_INDEX_ARN: arn:aws:s3vectors:ap-southeast-1:589077667575:bucket/studybot-vectors-589077667575-ap-southeast-1/index/studybot-kb-index
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DocumentsTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:Retrieve
+              Resource:
+                - arn:aws:bedrock:ap-southeast-1:589077667575:knowledge-base/LI32IWLOB5
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource:
+                - arn:aws:bedrock:ap-southeast-1:589077667575:inference-profile/global.amazon.nova-2-lite-v1:0
+                - arn:aws:bedrock:*::foundation-model/amazon.nova-2-lite-v1:0
+      Events:
         QuizApi:
           Type: HttpApi
           Properties:
             ApiId: !Ref StudyBotApi
             Path: /quiz
             Method: POST
-        DashboardApi:
+
+  HistoryFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: history_lambda.lambda_handler
+      Timeout: 30
+      Environment:
+        Variables:
+          DOCUMENTS_TABLE: !Ref DocumentsTable
+          AWS_REGION: ap-southeast-1
+          INGESTION_MODE: mock
+          BEDROCK_KNOWLEDGE_BASE_ID: LI32IWLOB5
+          BEDROCK_DATA_SOURCE_ID: V0ISBKEMXT
+          BEDROCK_GENERATION_MODEL_ID: global.amazon.nova-2-lite-v1:0
+          VECTOR_INDEX_ARN: arn:aws:s3vectors:ap-southeast-1:589077667575:bucket/studybot-vectors-589077667575-ap-southeast-1/index/studybot-kb-index
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref DocumentsTable
+      Events:
+        HistoryApi:
           Type: HttpApi
           Properties:
             ApiId: !Ref StudyBotApi
-            Path: /dashboard
+            Path: /history
             Method: GET
 
 Outputs:

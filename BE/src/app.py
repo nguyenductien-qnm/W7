@@ -10,9 +10,6 @@ from email.parser import BytesParser
 
 import boto3
 from boto3.dynamodb.conditions import Attr, Key
-from qa_kb import ask_knowledge_base
-from quiz_kb import generate_fallback_quiz, generate_quiz_from_kb
-from summary_kb import summarize_knowledge_base
 
 
 DEMO_USER_ID = "demo"
@@ -231,16 +228,6 @@ def refresh_doc_status_from_ingestion(doc_item):
         }
         TABLE.put_item(Item=updated_doc)
 
-        if kb_status == "READY":
-            concepts = updated_doc.get("concepts") or concepts_for(updated_doc.get("title", "uploaded.pdf"))
-            upsert_summary_item(
-                user_id=updated_doc.get("PK", "").replace("USER#", "") or DEMO_USER_ID,
-                doc_id=updated_doc.get("doc_id"),
-                summary=summary_text_for(updated_doc.get("title", "uploaded.pdf")),
-                testable_concepts=testable_concepts_for(concepts),
-                session_id=updated_doc.get("session_id", "default"),
-            )
-
         return updated_doc
     except Exception:
         return doc_item
@@ -263,15 +250,23 @@ def sk_session(session_id):
 
 
 def sk_summary(doc_id):
-    return f"DOC#{doc_id}#SUMMARY"
+    return f"DOC#{doc_id}#SUMMARY#LATEST"
 
 
 def sk_quiz(doc_id):
-    return f"DOC#{doc_id}#QUIZ"
+    return f"DOC#{doc_id}#QUIZ#LATEST"
 
 
 def sk_question(created_at_iso):
     return f"QUESTION#{created_at_iso}"
+
+
+def sk_summary_history(doc_id, created_at_iso):
+    return f"DOC#{doc_id}#SUMMARY#TS#{created_at_iso}"
+
+
+def sk_quiz_history(doc_id, created_at_iso):
+    return f"DOC#{doc_id}#QUIZ#TS#{created_at_iso}"
 
 
 def doc_id_from_sk(sk_value):
@@ -437,20 +432,6 @@ def list_documents(user_id):
     return docs
 
 
-def upsert_summary_item(user_id, doc_id, summary, testable_concepts, session_id="default"):
-    TABLE.put_item(
-        Item={
-            "PK": pk_user(user_id),
-            "SK": sk_summary(doc_id),
-            "doc_id": doc_id,
-            "session_id": session_id or "default",
-            "summary": summary,
-            "testable_concepts": testable_concepts,
-            "generated_at": now_iso(),
-        }
-    )
-
-
 def ensure_document_ready(user_id, doc_id):
     doc_item = get_doc(user_id, doc_id)
     if not doc_item:
@@ -473,14 +454,6 @@ def ensure_document_ready(user_id, doc_id):
         "concepts": concepts,
     }
     TABLE.put_item(Item=updated_doc)
-
-    upsert_summary_item(
-        user_id=user_id,
-        doc_id=doc_id,
-        summary=summary_text_for(doc_item.get("title", "uploaded.pdf")),
-        testable_concepts=testable_concepts_for(concepts),
-        session_id=updated_doc.get("session_id", "default"),
-    )
 
     return updated_doc
 
@@ -806,208 +779,6 @@ def get_selected_docs_for_session(user_id, selected_doc_ids, session_id):
     return selected_docs, None
 
 
-def handle_ask(event):
-    payload = parse_json_body(event)
-    user_id = get_user_id(event, payload)
-    session_id = get_session_id(event, payload) or "default"
-    selected_doc_ids = normalize_doc_ids(payload)
-    question = (payload.get("question") or "").strip()
-
-    if not selected_doc_ids or not question:
-        return response(400, {"message": "selected_doc_ids (or doc_id) and question are required"})
-
-    selected_docs, error_response = get_selected_docs_for_session(user_id, selected_doc_ids, session_id)
-    if error_response:
-        return error_response
-
-    # Keep first selected doc as primary for history compatibility.
-    primary_doc = selected_docs[0]
-    doc_id = primary_doc.get("doc_id")
-
-    created_at = now_iso()
-    topic = (primary_doc.get("concepts") or ["General"])[0]
-    answer = (
-        "I do not have enough grounded context from the selected document chunks to answer this yet. "
-        "Try rephrasing the question or wait until document ingestion completes."
-    )
-    citations = []
-
-    if BEDROCK_KNOWLEDGE_BASE_ID:
-        kb_result = ask_knowledge_base(
-            question=question,
-            knowledge_base_id=BEDROCK_KNOWLEDGE_BASE_ID,
-            doc_title=primary_doc.get("title", "uploaded.pdf"),
-            allowed_doc_ids=[item.get("doc_id") for item in selected_docs if item.get("doc_id")],
-            doc_titles_by_id={
-                item.get("doc_id"): item.get("title", "uploaded.pdf")
-                for item in selected_docs
-                if item.get("doc_id")
-            },
-        )
-        answer = kb_result.get("answer") or answer
-        citations = kb_result.get("citations") or citations
-        topic = kb_result.get("topic") or topic
-
-    TABLE.put_item(
-        Item={
-            "PK": pk_user(user_id),
-            "SK": sk_question(created_at),
-            "doc_id": doc_id,
-            "session_id": session_id,
-            "selected_doc_ids": [item.get("doc_id") for item in selected_docs if item.get("doc_id")],
-            "question": question,
-            "answer": answer,
-            "citations": citations,
-            "topic": topic,
-            "created_at": created_at,
-        }
-    )
-
-    return response(
-        200,
-        {
-            "doc_id": doc_id,
-            "session_id": session_id,
-            "selected_doc_ids": [item.get("doc_id") for item in selected_docs if item.get("doc_id")],
-            "question": question,
-            "answer": answer,
-            "citation": citations,
-            "citations": citations,
-        },
-    )
-
-
-def handle_summary(event):
-    payload = parse_json_body(event)
-    user_id = payload.get("user_id") or get_user_id(event, payload)
-    session_id = get_session_id(event, payload) or "default"
-    selected_doc_ids = normalize_doc_ids(payload)
-    if not selected_doc_ids:
-        return response(400, {"message": "selected_doc_ids (or doc_id) is required"})
-
-    selected_docs, error_response = get_selected_docs_for_session(user_id, selected_doc_ids, session_id)
-    if error_response:
-        return error_response
-
-    primary_doc = selected_docs[0]
-    fallback_summary_item = get_summary(user_id, primary_doc.get("doc_id"))
-    fallback_summary_text = (fallback_summary_item or {}).get("summary") or summary_text_for(
-        primary_doc.get("title", "uploaded.pdf")
-    )
-
-    fallback_concepts = []
-    for doc in selected_docs:
-        for concept in doc.get("concepts", []):
-            if concept not in fallback_concepts:
-                fallback_concepts.append(concept)
-    fallback_concepts = fallback_concepts[:5] or testable_concepts_for([])
-
-    summary_text = fallback_summary_text
-    testable_concepts = (
-        (fallback_summary_item or {}).get("testable_concepts") or fallback_concepts
-    )
-
-    if BEDROCK_KNOWLEDGE_BASE_ID:
-        try:
-            kb_summary = summarize_knowledge_base(
-                question="Create a concise study summary and identify testable concepts.",
-                knowledge_base_id=BEDROCK_KNOWLEDGE_BASE_ID,
-                selected_doc_ids=[item.get("doc_id") for item in selected_docs if item.get("doc_id")],
-                fallback_concepts=fallback_concepts,
-            )
-            summary_text = kb_summary.get("summary") or summary_text
-            testable_concepts = kb_summary.get("testable_concepts") or testable_concepts
-        except Exception:
-            pass
-
-    upsert_summary_item(
-        user_id=user_id,
-        doc_id=primary_doc.get("doc_id"),
-        summary=summary_text,
-        testable_concepts=testable_concepts[:5],
-        session_id=session_id,
-    )
-
-    return response(
-        200,
-        {
-            "doc_id": primary_doc.get("doc_id"),
-            "session_id": session_id,
-            "selected_doc_ids": [item.get("doc_id") for item in selected_docs if item.get("doc_id")],
-            "summary": summary_text,
-            "testable_concepts": testable_concepts[:5],
-        },
-    )
-
-
-def handle_quiz(event):
-    payload = parse_json_body(event)
-    user_id = payload.get("user_id") or get_user_id(event, payload)
-    session_id = get_session_id(event, payload) or "default"
-    selected_doc_ids = normalize_doc_ids(payload)
-    difficulty = str(payload.get("difficulty") or "medium").lower()
-    requested_count = payload.get("count", 5)
-
-    if not selected_doc_ids:
-        return response(400, {"message": "selected_doc_ids (or doc_id) is required"})
-
-    selected_docs, error_response = get_selected_docs_for_session(user_id, selected_doc_ids, session_id)
-    if error_response:
-        return error_response
-
-    primary_doc = selected_docs[0]
-    doc_id = primary_doc.get("doc_id")
-
-    fallback_concepts = []
-    for doc in selected_docs:
-        for concept in doc.get("concepts", []):
-            if concept not in fallback_concepts:
-                fallback_concepts.append(concept)
-    fallback_concepts = fallback_concepts[:10] or concepts_for(primary_doc.get("title"))
-
-    count = normalize_quiz_count(requested_count)
-    if difficulty == "easy":
-        count = max(5, min(count, 7))
-    elif difficulty == "hard":
-        count = min(10, max(count, 7))
-
-    questions = []
-    if BEDROCK_KNOWLEDGE_BASE_ID:
-        try:
-            questions = generate_quiz_from_kb(
-                knowledge_base_id=BEDROCK_KNOWLEDGE_BASE_ID,
-                selected_doc_ids=[item.get("doc_id") for item in selected_docs if item.get("doc_id")],
-                fallback_concepts=fallback_concepts,
-                count=count,
-            )
-        except Exception:
-            questions = []
-
-    if not questions:
-        questions = generate_fallback_quiz(fallback_concepts, count=count)
-
-    quiz_item = {
-        "PK": pk_user(user_id),
-        "SK": sk_quiz(doc_id),
-        "doc_id": doc_id,
-        "session_id": session_id,
-        "selected_doc_ids": [item.get("doc_id") for item in selected_docs if item.get("doc_id")],
-        "questions": questions,
-        "generated_at": now_iso(),
-    }
-    TABLE.put_item(Item=quiz_item)
-
-    return response(
-        200,
-        {
-            "doc_id": doc_id,
-            "session_id": session_id,
-            "selected_doc_ids": [item.get("doc_id") for item in selected_docs if item.get("doc_id")],
-            "questions": questions,
-        },
-    )
-
-
 def handle_dashboard(event):
     query = event.get("queryStringParameters") or {}
     user_id = query.get("user_id") or DEMO_USER_ID
@@ -1057,12 +828,6 @@ def route_request(event):
         return handle_documents_list(event)
     if method == "GET" and path == "/docs/list":
         return handle_documents_list(event)
-    if method == "POST" and path == "/ask":
-        return handle_ask(event)
-    if method == "POST" and path == "/summary":
-        return handle_summary(event)
-    if method == "POST" and path == "/quiz":
-        return handle_quiz(event)
     if method == "GET" and path == "/dashboard":
         return handle_dashboard(event)
 

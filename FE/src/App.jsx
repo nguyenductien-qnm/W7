@@ -76,6 +76,172 @@ function answerIndex(question) {
   return exact >= 0 ? exact : 0;
 }
 
+function renderInlineMarkdown(text, keyPrefix, citations = [], messageId = "", onOpenCitation = null) {
+  if (!text) return null;
+  const citationPattern = /(\[(?:\d+(?:,\s*)?)+\])/g;
+  const citationParts = String(text).split(citationPattern);
+  const nodes = [];
+  const inlinePattern = /\*\*([^*]+)\*\*|`([^`]+)`|\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g;
+
+  citationParts.forEach((part, partIndex) => {
+    const citationMatch = part.match(/^\[((?:\d+(?:,\s*)?)+)\]$/);
+    if (citationMatch) {
+      const numbers = citationMatch[1]
+        .split(",")
+        .map((value) => Number(value.trim()))
+        .filter((value) => Number.isInteger(value) && value >= 1 && value <= citations.length);
+      if (numbers.length) {
+        nodes.push(
+          <span className="citation-inline" key={`${keyPrefix}-cite-${partIndex}`}>
+            {numbers.map((number) => (
+              <button
+                key={`${keyPrefix}-cite-btn-${number}`}
+                type="button"
+                onClick={() => onOpenCitation?.(messageId, number - 1)}
+              >
+                [{number}]
+              </button>
+            ))}
+          </span>
+        );
+        return;
+      }
+    }
+
+    let cursor = 0;
+    let match;
+    while ((match = inlinePattern.exec(part)) !== null) {
+      if (match.index > cursor) {
+        nodes.push(<span key={`${keyPrefix}-txt-${partIndex}-${cursor}`}>{part.slice(cursor, match.index)}</span>);
+      }
+      if (match[1]) {
+        nodes.push(<strong key={`${keyPrefix}-b-${partIndex}-${match.index}`}>{match[1]}</strong>);
+      } else if (match[2]) {
+        nodes.push(<code key={`${keyPrefix}-c-${partIndex}-${match.index}`}>{match[2]}</code>);
+      } else if (match[3] && match[4]) {
+        nodes.push(
+          <a
+            key={`${keyPrefix}-a-${partIndex}-${match.index}`}
+            href={match[4]}
+            target="_blank"
+            rel="noreferrer noopener"
+          >
+            {match[3]}
+          </a>
+        );
+      }
+      cursor = match.index + match[0].length;
+    }
+    if (cursor < part.length) {
+      nodes.push(<span key={`${keyPrefix}-tail-${partIndex}`}>{part.slice(cursor)}</span>);
+    }
+    inlinePattern.lastIndex = 0;
+  });
+
+  return nodes;
+}
+
+function renderMarkdownText(text, messageId, citations = [], onOpenCitation = null) {
+  if (!text) return null;
+  const blocks = [];
+  const lines = String(text).replace(/\r\n/g, "\n").split("\n");
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line.trim()) {
+      i += 1;
+      continue;
+    }
+
+    if (line.startsWith("```")) {
+      i += 1;
+      const codeLines = [];
+      while (i < lines.length && !lines[i].startsWith("```")) {
+        codeLines.push(lines[i]);
+        i += 1;
+      }
+      if (i < lines.length) i += 1;
+      blocks.push(
+        <pre key={`pre-${blocks.length}`}>
+          <code>{codeLines.join("\n")}</code>
+        </pre>
+      );
+      continue;
+    }
+
+    const heading = line.match(/^(#{1,3})\s+(.+)$/);
+    if (heading) {
+      const level = Math.min(3, heading[1].length);
+      const Tag = `h${level}`;
+      blocks.push(
+        <Tag key={`h-${blocks.length}`}>
+          {renderInlineMarkdown(heading[2], `h-${blocks.length}`, citations, messageId, onOpenCitation)}
+        </Tag>
+      );
+      i += 1;
+      continue;
+    }
+
+    if (/^[-*]\s+/.test(line)) {
+      const items = [];
+      while (i < lines.length && /^[-*]\s+/.test(lines[i])) {
+        items.push(lines[i].replace(/^[-*]\s+/, ""));
+        i += 1;
+      }
+      blocks.push(
+        <ul key={`ul-${blocks.length}`}>
+          {items.map((item, idx) => (
+            <li key={`ul-${blocks.length}-${idx}`}>
+              {renderInlineMarkdown(item, `ul-${blocks.length}-${idx}`, citations, messageId, onOpenCitation)}
+            </li>
+          ))}
+        </ul>
+      );
+      continue;
+    }
+
+    if (/^\d+\.\s+/.test(line)) {
+      const items = [];
+      while (i < lines.length && /^\d+\.\s+/.test(lines[i])) {
+        items.push(lines[i].replace(/^\d+\.\s+/, ""));
+        i += 1;
+      }
+      blocks.push(
+        <ol key={`ol-${blocks.length}`}>
+          {items.map((item, idx) => (
+            <li key={`ol-${blocks.length}-${idx}`}>
+              {renderInlineMarkdown(item, `ol-${blocks.length}-${idx}`, citations, messageId, onOpenCitation)}
+            </li>
+          ))}
+        </ol>
+      );
+      continue;
+    }
+
+    const paragraphLines = [];
+    while (
+      i < lines.length &&
+      lines[i].trim() &&
+      !lines[i].startsWith("```") &&
+      !/^(#{1,3})\s+/.test(lines[i]) &&
+      !/^[-*]\s+/.test(lines[i]) &&
+      !/^\d+\.\s+/.test(lines[i])
+    ) {
+      paragraphLines.push(lines[i]);
+      i += 1;
+    }
+    const paragraphText = paragraphLines.join("\n");
+    blocks.push(
+        <p key={`p-${blocks.length}`}>
+          {renderInlineMarkdown(paragraphText, `p-${blocks.length}`, citations, messageId, onOpenCitation)}
+        </p>
+      );
+  }
+
+  return <div className="markdown-body">{blocks}</div>;
+}
+
 export default function App() {
   const [auth, setAuth] = useState(getSavedAuth());
   const [loginEmail, setLoginEmail] = useState(getSavedAuth().email || "");
@@ -91,9 +257,7 @@ export default function App() {
   const [activeSessionId, setActiveSessionId] = useState(() =>
     localStorage.getItem(storageKey(currentUserId, "active-session")) || "default"
   );
-  const [messagesBySession, setMessagesBySession] = useState(() =>
-    loadJson(storageKey(currentUserId, "messages"), {})
-  );
+  const [messagesBySession, setMessagesBySession] = useState({});
 
   const [docs, setDocs] = useState([]);
   const [selectedDocIds, setSelectedDocIds] = useState(() =>
@@ -140,10 +304,6 @@ export default function App() {
   }, [sessions, currentUserId]);
 
   useEffect(() => {
-    localStorage.setItem(storageKey(currentUserId, "messages"), JSON.stringify(messagesBySession));
-  }, [messagesBySession, currentUserId]);
-
-  useEffect(() => {
     localStorage.setItem(storageKey(currentUserId, "active-session"), activeSessionId);
   }, [activeSessionId, currentUserId]);
 
@@ -161,6 +321,7 @@ export default function App() {
 
   useEffect(() => {
     async function boot() {
+      setMessagesBySession({});
       await refreshSessions();
       await refreshDocs();
     }
@@ -169,6 +330,7 @@ export default function App() {
 
   useEffect(() => {
     refreshDocs();
+    refreshHistory(activeSessionId);
   }, [activeSessionId]);
 
   useEffect(() => {
@@ -240,6 +402,29 @@ export default function App() {
       showToast(err.message);
     } finally {
       setBusyFlag("docs", false);
+    }
+  }
+
+  function normalizeHistoryMessages(value) {
+    return safeArray(value).map((message) => ({
+      id: message.id || uid("msg"),
+      role: message.role || "bot",
+      feature: message.feature || "chat",
+      text: message.text || "",
+      citations: safeArray(message.citations),
+      quiz: safeArray(message.quiz),
+      cards: safeArray(message.cards),
+      createdAt: message.createdAt || message.created_at || new Date().toISOString(),
+    }));
+  }
+
+  async function refreshHistory(sessionId = activeSessionId) {
+    try {
+      const body = await call(`/history?session_id=${encodeURIComponent(sessionId)}`);
+      const historyMessages = normalizeHistoryMessages(body.messages);
+      setMessagesBySession((prev) => ({ ...prev, [sessionId]: historyMessages }));
+    } catch (err) {
+      showToast(`History load failed: ${err.message}`);
     }
   }
 
@@ -519,29 +704,6 @@ export default function App() {
     });
   }
 
-  function renderAnswerWithCitations(text, citations, messageId) {
-    if (!text) return null;
-    const parts = String(text).split(/(\[(?:\d+(?:,\s*)?)+\])/g);
-    return parts.map((part, index) => {
-      const match = part.match(/^\[((?:\d+(?:,\s*)?)+)\]$/);
-      if (!match) return <span key={`${messageId}-text-${index}`}>{part}</span>;
-      const numbers = match[1]
-        .split(",")
-        .map((value) => Number(value.trim()))
-        .filter((value) => Number.isInteger(value) && value >= 1 && value <= citations.length);
-      if (!numbers.length) return <span key={`${messageId}-text-${index}`}>{part}</span>;
-      return (
-        <span className="citation-inline" key={`${messageId}-cite-${index}`}>
-          {numbers.map((number) => (
-            <button key={number} type="button" onClick={() => openCitation(messageId, number - 1)}>
-              [{number}]
-            </button>
-          ))}
-        </span>
-      );
-    });
-  }
-
   async function send() {
     const prompt = input.trim();
     if (!prompt || busy.send) return;
@@ -588,6 +750,7 @@ export default function App() {
             session_id: activeSessionId,
             doc_id: scopedDocIds[0],
             selected_doc_ids: scopedDocIds,
+            question: prompt,
           },
         });
         const concepts = safeArray(body.testable_concepts);
@@ -605,6 +768,8 @@ export default function App() {
             session_id: activeSessionId,
             doc_id: scopedDocIds[0],
             selected_doc_ids: scopedDocIds,
+            feature: "quiz",
+            question: prompt,
             difficulty: "medium",
             count: 5,
           },
@@ -623,6 +788,8 @@ export default function App() {
             session_id: activeSessionId,
             doc_id: scopedDocIds[0],
             selected_doc_ids: scopedDocIds,
+            feature: "flashcards",
+            question: prompt,
             difficulty: "easy",
             count: 6,
           },
@@ -812,10 +979,8 @@ export default function App() {
                       <span />
                       <span />
                     </span>
-                  ) : message.citations?.length ? (
-                    renderAnswerWithCitations(message.text, message.citations, message.id)
                   ) : (
-                    message.text
+                    renderMarkdownText(message.text, message.id, safeArray(message.citations), openCitation)
                   )}
                 </div>
                 {message.quiz?.length ? (

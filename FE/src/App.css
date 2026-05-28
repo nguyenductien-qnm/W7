@@ -433,12 +433,105 @@ select:focus {
   overflow-wrap: anywhere;
 }
 
+.markdown-body {
+  display: grid;
+  gap: 8px;
+}
+
+.markdown-body > * {
+  margin: 0;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3 {
+  color: var(--ink);
+  font-family: "Cormorant Garamond", Georgia, serif;
+  line-height: 1.22;
+}
+
+.markdown-body h1 {
+  font-size: 24px;
+}
+
+.markdown-body h2 {
+  font-size: 21px;
+}
+
+.markdown-body h3 {
+  font-size: 18px;
+}
+
+.markdown-body p {
+  white-space: pre-wrap;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 4px;
+}
+
+.markdown-body li {
+  line-height: 1.5;
+}
+
+.markdown-body pre {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--canvas);
+  overflow-x: auto;
+}
+
+.markdown-body pre code {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  font-size: 12px;
+}
+
+.markdown-body code {
+  font-family: "JetBrains Mono", Consolas, monospace;
+  font-size: 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--canvas);
+  padding: 1px 5px;
+}
+
+.markdown-body a {
+  color: var(--primary-strong);
+  text-decoration: underline;
+}
+
+.markdown-body strong {
+  font-weight: 700;
+}
+
 .message.user .message-body {
   border-color: transparent;
   border-bottom-left-radius: var(--radius-lg);
   border-bottom-right-radius: var(--radius-sm);
   background: var(--primary);
   color: #fff;
+}
+
+.message.user .markdown-body h1,
+.message.user .markdown-body h2,
+.message.user .markdown-body h3,
+.message.user .markdown-body a {
+  color: #fff;
+}
+
+.message.user .markdown-body code,
+.message.user .markdown-body pre {
+  border-color: rgba(255, 255, 255, 0.35);
+  background: rgba(255, 255, 255, 0.12);
 }
 
 .message.error .message-body {

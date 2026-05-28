@@ -138,6 +138,16 @@ class StudyBotInfraStack(Stack):
             memory_size=512,
             environment=ai_lambda_environment,
         )
+        history_lambda = lambda_.Function(
+            self,
+            "StudyBotHistoryLambda",
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            handler="history_lambda.lambda_handler",
+            code=backend_lambda_code,
+            timeout=Duration.seconds(30),
+            memory_size=512,
+            environment=ai_lambda_environment,
+        )
 
         process_pdf_lambda = lambda_.Function(
             self,
@@ -161,6 +171,7 @@ class StudyBotInfraStack(Stack):
         documents_table.grant_read_write_data(qa_lambda)
         documents_table.grant_read_write_data(summary_lambda)
         documents_table.grant_read_write_data(quiz_lambda)
+        documents_table.grant_read_data(history_lambda)
         documents_table.grant_read_write_data(process_pdf_lambda)
         uploads_bucket.grant_put(api_lambda)
         uploads_bucket.grant_read_write(process_pdf_lambda)
@@ -241,6 +252,10 @@ class StudyBotInfraStack(Stack):
             "StudyBotQuizLambdaIntegration",
             quiz_lambda,
         )
+        history_integration = apigatewayv2_integrations.HttpLambdaIntegration(
+            "StudyBotHistoryLambdaIntegration",
+            history_lambda,
+        )
         http_api.add_routes(
             path="/ask",
             methods=[apigatewayv2.HttpMethod.POST],
@@ -255,6 +270,11 @@ class StudyBotInfraStack(Stack):
             path="/quiz",
             methods=[apigatewayv2.HttpMethod.POST],
             integration=quiz_integration,
+        )
+        http_api.add_routes(
+            path="/history",
+            methods=[apigatewayv2.HttpMethod.GET],
+            integration=history_integration,
         )
         http_api.add_routes(
             path="/{proxy+}",
@@ -278,3 +298,4 @@ class StudyBotInfraStack(Stack):
         CfnOutput(self, "QaLambdaName", value=qa_lambda.function_name)
         CfnOutput(self, "SummaryLambdaName", value=summary_lambda.function_name)
         CfnOutput(self, "QuizLambdaName", value=quiz_lambda.function_name)
+        CfnOutput(self, "HistoryLambdaName", value=history_lambda.function_name)
