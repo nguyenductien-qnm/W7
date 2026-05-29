@@ -2,6 +2,10 @@
 
 Target API: `https://api.nguyenductien.cloud`
 
+Latest verified: May 29, 2026 local time. Demo email
+`demo@studybot.com` maps to user `demo`; ready document
+`w7-demo-photosynthesis` is in session `default`.
+
 Set variables:
 
 ```powershell
@@ -41,7 +45,7 @@ Invoke-RestMethod "$api/docs/list?user_id=$user&session_id=$session" -Headers $h
 Invoke-RestMethod "$api/ask" -Method POST -Headers $headers -Body (@{
   user_id = $user
   session_id = $session
-  selected_doc_ids = @("REPLACE_READY_DOC_ID")
+  selected_doc_ids = @("w7-demo-photosynthesis")
   question = "What are the most important concepts in this document?"
 } | ConvertTo-Json)
 ```
@@ -52,7 +56,7 @@ Invoke-RestMethod "$api/ask" -Method POST -Headers $headers -Body (@{
 Invoke-RestMethod "$api/summary" -Method POST -Headers $headers -Body (@{
   user_id = $user
   session_id = $session
-  selected_doc_ids = @("REPLACE_READY_DOC_ID")
+  selected_doc_ids = @("w7-demo-photosynthesis")
   question = "Summarize this for an exam."
 } | ConvertTo-Json)
 ```
@@ -63,7 +67,7 @@ Invoke-RestMethod "$api/summary" -Method POST -Headers $headers -Body (@{
 Invoke-RestMethod "$api/quiz" -Method POST -Headers $headers -Body (@{
   user_id = $user
   session_id = $session
-  selected_doc_ids = @("REPLACE_READY_DOC_ID")
+  selected_doc_ids = @("w7-demo-photosynthesis")
   feature = "quiz"
   count = 5
   question = "Quiz me."
@@ -86,7 +90,7 @@ Invoke-RestMethod "$api/planner/clarify" -Method POST -Headers $headers -Body (@
 Invoke-RestMethod "$api/planner" -Method POST -Headers $headers -Body (@{
   user_id = $user
   session_id = $session
-  selected_doc_ids = @("REPLACE_READY_DOC_ID")
+  selected_doc_ids = @("w7-demo-photosynthesis")
   exam_date = "2026-06-20"
   daily_study_hours = 2
   weak_topics = @("CAP theorem", "Replication")

@@ -23,7 +23,7 @@
     "AgentCoreGatewayId": "studybot-tools-jvjik80lgi",
     "UploadsBucketName": "studybotinfrastack-studybotuploadsa01cf717-yffnnbch9sde",
     "QaLambdaName": "StudyBotInfraStack-StudyBotQaLambda00A30CC0-9vNZtze8ttev",
-    "DataSourceId": "2Q8XWMU3ER",
+    "DataSourceId": "FHGHEZJFOY",
     "FrontendCloudFrontDomain": "d202pyjoa7b4uh.cloudfront.net"
   }
 }

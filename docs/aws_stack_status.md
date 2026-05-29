@@ -1,6 +1,6 @@
 # Current AWS Stack Status
 
-Checked on May 28, 2026 with:
+Checked on May 29, 2026 with:
 
 ```powershell
 aws cloudformation describe-stacks --stack-name StudyBotInfraStack --region ap-southeast-1
@@ -11,7 +11,7 @@ cd infra; cdk diff StudyBotInfraStack
 
 - Stack: `StudyBotInfraStack`
 - Status: `UPDATE_COMPLETE`
-- Last updated: `2026-05-28T14:25:00Z`
+- Last updated: `2026-05-28T18:51:13Z`
 - Region: `ap-southeast-1`
 - API custom domain: `api.nguyenductien.cloud`
 - Frontend domain: `nguyenductien.cloud`
@@ -22,18 +22,21 @@ cd infra; cdk diff StudyBotInfraStack
 - Frontend bucket: `studybotinfrastack-studybotfrontendbucket0d64d827-ve7senepf9rg`
 - CloudFront distribution domain: `d202pyjoa7b4uh.cloudfront.net`
 - Bedrock Knowledge Base: `AXVC1I6AQN`
-- Bedrock data source: `2Q8XWMU3ER`
+- Bedrock data source: `FHGHEZJFOY`
+- Bedrock data source name: `studybot-kb-ds-v2`
+- Bedrock fixed chunking: `300` max tokens, `15` percent overlap
 - Vector index ARN: `arn:aws:s3vectors:ap-southeast-1:589077667575:bucket/studybotinfrastack-studybotknowledgebasevectorbuck-t9bgmpd2yqk1/index/studybot-kb-index-v2`
 - AgentCore Gateway: `studybot-tools-jvjik80lgi`
 - CloudWatch dashboard: `StudyBot-W7-Operations`
 
 ## CDK Diff Finding
 
-After pulling latest `origin/main`, `cdk diff StudyBotInfraStack` no longer shows the earlier serious drift where Lambda environment variables and IAM policies would repoint to older imported resources.
+After the May 29 deploy, `cdk deploy StudyBotInfraStack --require-approval never --outputs-file outputs.json` completed successfully.
 
-Remaining differences are limited to:
+Confirmed live checks:
 
-- CDK bucket notification handler policy wiring.
-- Frontend `BucketDeployment` source object hash.
+- Resource Groups Tagging API returns 49 resources with `Project=W7Capstone` and `Team=G11`.
+- Bedrock data source `FHGHEZJFOY` reports fixed chunking at `300` tokens with `15` percent overlap.
+- Frontend returns HTTP 200 at `https://nguyenductien.cloud`.
 
 No live table, upload bucket, Bedrock Knowledge Base, data source, or vector index repointing was shown in the latest diff.

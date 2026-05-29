@@ -188,7 +188,7 @@ React StudyBot app
 - Frontend bucket: `studybotinfrastack-studybotfrontendbucket0d64d827-ve7senepf9rg`
 - CloudFront domain: `d202pyjoa7b4uh.cloudfront.net`
 - Bedrock Knowledge Base: `AXVC1I6AQN`
-- Bedrock data source: `2Q8XWMU3ER`
+- Bedrock data source: `FHGHEZJFOY`
 - S3 Vectors index: `studybot-kb-index-v2`
 - AgentCore Gateway: `studybot-tools-jvjik80lgi`
 - CloudWatch dashboard: `StudyBot-W7-Operations`

@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from aws_cdk import Duration
+from aws_cdk import Duration, Tags
 from aws_cdk import aws_certificatemanager as acm
 from aws_cdk import aws_cloudfront as cloudfront
 from aws_cdk import aws_cloudfront_origins as origins
@@ -27,6 +27,9 @@ def create_frontend_resources(
         subject_alternative_names=[f"www.{root_domain_name}"],
         region="us-east-1",
     )
+    for tag_key in ("Project", "Team", "Owner", "Environment"):
+        Tags.of(frontend_certificate).remove(tag_key, priority=300)
+
     frontend_distribution = cloudfront.Distribution(
         scope,
         "StudyBotFrontendDistribution",

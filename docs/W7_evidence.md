@@ -22,7 +22,14 @@
 
 **Domain choice:** Domain A - EduTech: AI Study Buddy
 
-**Total estimated spend:** approximately **USD 1.58** for the 48-hour
+**Official demo login:** `demo@studybot.com` maps to user `demo`.
+
+**Official demo document:** `w7-demo-photosynthesis` in session `default`,
+title `W7 Demo Photosynthesis Study Guide`.
+
+**Chosen optional capability:** **Advanced Cost Insights**.
+
+**Total estimated spend:** approximately **USD 1.51** for the 48-hour
 demo window.
 
 ## 2. Pitch and Vision
@@ -95,11 +102,10 @@ production-grade tenant isolation are future work.
 | Amazon Bedrock | Nova 2 Lite calls, embeddings, RAG retrieval, and document ingestion | ~USD 0.77 |
 | VPC interface endpoints | Bedrock/Bedrock Agent/Textract private access during demo | ~USD 0.62 |
 | CloudFront and S3 | Static frontend, uploaded PDFs, processed text, and vector artifacts | ~USD 0.10 |
-| KMS | Customer-managed key prorated for 48 hours, if enabled | ~USD 0.07 |
 | Lambda | Approximately 200 invocations across microservices | ~USD 0.01 |
 | API Gateway | Approximately 500 HTTP API requests | \< USD 0.01 |
 | DynamoDB | On-demand reads/writes for demo traffic | \< USD 0.01 |
-| **Total** | Serverless-first architecture | **~USD 1.58** |
+| **Total** | Serverless-first architecture | **~USD 1.51** |
 
 ### 4.2 Observations
 
@@ -117,6 +123,11 @@ The team also avoided NAT Gateway by setting `nat_gateways=0` in the VPC
 and using gateway/interface endpoints for AWS services. This reduces
 fixed daily network cost and keeps Lambda traffic private.
 
+The deployed storage uses S3-managed encryption (`AES256`) and service
+defaults where appropriate. The team is not claiming a project KMS
+customer-managed key for W7, so KMS is not included as a project line
+item.
+
 ### 4.3 Budget Alarm Evidence
 
 The team created a new AWS Budgets safety net specifically for the W7
@@ -133,6 +144,34 @@ Current notification state: the 50% actual-spend notification is in
 still `OK`. This gives the project a double layer of warning: AWS
 Budgets controls spend, while CloudWatch alarms monitor StudyBot runtime
 health.
+
+### 4.4 Cost Anomaly Detection
+
+Advanced Cost Insights is the selected optional capability. Account-level
+Cost Anomaly Detection is enabled through monitor
+`Default-Services-Monitor`, ARN
+`arn:aws:ce::589077667575:anomalymonitor/fcaf1467-7a72-42cb-b789-47f58f6c4777`.
+The subscription `Default-Services-Subscription` runs daily and sends
+confirmed email alerts to `dinhdanhnam1@gmail.com` when both absolute
+impact is at least USD 100 and percentage impact is at least 40%.
+
+Cost Explorer evidence was checked from the AWS CLI on
+`2026-05-28T18:53Z` UTC. Historical Wednesday/Thursday/Friday screenshots
+were not available in this repository, so the available evidence is the
+current Cost Explorer/Budgets/Anomaly state plus the live CLI values:
+the W7 budget shows actual spend USD 57.289 and forecast spend USD
+58.837 for May 27 to June 4, 2026.
+
+### 4.5 Cost Per Feature
+
+| Feature | Main AWS services | Cost behavior |
+|----|----|----|
+| Upload and ingestion | S3, Lambda, Bedrock Knowledge Base, S3 Vectors, optional Textract | Mostly per-document processing; local extraction avoids Textract unless needed. |
+| Q&A | API Gateway, Lambda, Bedrock Knowledge Base retrieval, Nova 2 Lite | Per request; token usage dominates after retrieval. |
+| Summary | API Gateway, Lambda, Bedrock retrieval, Nova 2 Lite | Per selected document and output length; summaries are capped to exam-focused output. |
+| Quiz and flashcards | API Gateway, Lambda, Bedrock retrieval, Nova 2 Lite | Per generated question/card count; defaults keep count small for demo. |
+| Planner | API Gateway, Lambda, DynamoDB, Bedrock retrieval/model | Per plan generation; DynamoDB writes are negligible at demo scale. |
+| Frontend/static serving | CloudFront and S3 | Low fixed storage plus request/data transfer usage; no always-on frontend server. |
 
 ## 5. Security
 
@@ -295,12 +334,11 @@ CloudWatch alarms, not billing alarms:
 - Ingestion p95 duration \> 4 minutes.
 - Ingestion failure log signal \>= 1.
 
-Current stack check: 11 StudyBot CloudWatch alarms exist in
-`ap-southeast-1`. API, Q&A, planner, quiz, history, and several Lambda
-error alarms are `OK`; alarms for low-traffic functions such as upload,
-summary, process PDF, ingestion duration, and ingestion failure show
-`INSUFFICIENT_DATA`, which is expected when the function has not emitted
-recent metrics.
+Current stack check after the May 29 demo smoke: 11 StudyBot CloudWatch
+alarms exist in `ap-southeast-1`. At least one runtime alarm is no longer
+`INSUFFICIENT_DATA`: the Summary Lambda error alarm is `OK`. Other
+low-traffic alarms can still show `INSUFFICIENT_DATA` when their metric
+has not emitted recent data after the CDK update.
 
 ![Figure 21. CloudWatch alarms for
 StudyBot.](figures/fig-21-cloudwatch-alarms.png)
@@ -337,11 +375,11 @@ memory.**
 
 The latest smoke test verified the public API and main user flows
 against `https://api.nguyenductien.cloud`: login, document listing,
-planner clarification, summary generation, quiz generation, planner
-creation, dashboard aggregation, and Q&A endpoint health. The Q&A
-endpoint returned HTTP 200, but one selected demo document still
-produced a fallback answer without citations. This is recorded as a
-retrieval/ingestion quality gap rather than an API availability failure.
+Q&A, summary generation, quiz generation, planner clarification, planner
+creation, and dashboard aggregation. The official demo login
+`demo@studybot.com` returned success for user `demo`; `docs/list`
+returned ready document `w7-demo-photosynthesis`; Q&A returned a grounded
+answer about photosynthesis inputs and outputs with citations.
 
 ## 6.5 Measurement and Decisions
 
@@ -431,6 +469,27 @@ Vectors.](figures/fig-24-bedrock-kb-s3-vectors.png)
 
 **Figure 24. Bedrock Knowledge Base using S3 Vectors.**
 
+### 6.5.5 Knowledge Base Chunking Decision
+
+StudyBot uses tuned fixed chunking in Bedrock Knowledge Base:
+**300 tokens with 15% overlap**. The deployed data source is
+`studybot-kb-ds-v2` with id `FHGHEZJFOY`, and
+`get-data-source` reports `maxTokens=300` and `overlapPercentage=15`.
+
+This was chosen after measuring the sample data in `sample_data/`.
+Median paragraph/cue block length was short: wiki files were mostly in
+the 18-59 word median range, and the VTT lecture transcript had a median
+cue block of 19 words. A 300-token chunk usually keeps one to three
+related concepts together while reducing the chance that unrelated slide
+topics are packed into one retrieval unit.
+
+Semantic chunking was considered but rejected for this demo. It may
+improve topic boundaries later, but switching late would add ingestion
+cost and replacement risk. Fixed chunking is lower risk for the live
+demo, works with both Vietnamese and English study material, and keeps
+the existing `cohere.embed-multilingual-v3` embedding model and
+1024-dimension S3 Vectors index unchanged.
+
 ## 7. Lessons Learned
 
 ### 7.1 What Went Well
@@ -490,6 +549,32 @@ NotebookLM, StudyBot still needs:
 - Better fallback behavior when document ingestion quality is low.
 
 ## 8. Teardown Plan
+
+Teardown is intentionally prepared but not executed before grading,
+because deleting the stack would remove the live demo at
+`https://nguyenductien.cloud`. The team will execute teardown after the
+grader confirms the demo is complete, then attach the final deletion and
+Cost Explorer proof in `docs/teardown_confirmation.md`.
+
+Prepared teardown evidence and controls:
+
+- The full ordered teardown checklist exists in
+  `docs/teardown_confirmation.md`.
+- CDK destroy command is documented and targets only
+  `StudyBotInfraStack`.
+- Current stack outputs identify the exact resources to verify after
+  deletion: upload bucket, frontend bucket, DynamoDB table, Bedrock
+  Knowledge Base, data source `FHGHEZJFOY`, S3 Vectors index, VPC,
+  Lambda functions, CloudWatch alarms, CloudFront, Route 53, and ACM.
+- The live stack has project tags (`Project=W7Capstone`, `Team=G11`,
+  `Owner=DinhDanhNam`, `Environment=hackathon`) to make post-demo
+  resource discovery easier.
+- The AWS Budgets safety net and Cost Anomaly Detection subscription are
+  active before teardown, so any residual spend should remain visible.
+- The final proof to capture after teardown is: CloudFormation stack
+  deletion status, Resource Groups Tagging API check for remaining W7
+  resources, and a final Cost Explorer screenshot/CLI export showing no
+  continuing W7 resource spend.
 
 ### 8.1 Ordered Teardown Checklist
 
@@ -583,8 +668,9 @@ aws ec2 describe-vpc-endpoints --filters Name=vpc-id,Values=<vpc-id>
   `nat_gateways=0`, gateway endpoints, and interface endpoints.
 - `infra/studybot_infra/resources_storage.py`: S3 buckets and DynamoDB
   on-demand table.
-- `infra/studybot_infra/resources_kb.py`: Bedrock Knowledge Base and S3
-  Vectors configuration.
+- `infra/studybot_infra/resources_kb.py`: Bedrock Knowledge Base, S3
+  Vectors configuration, and tuned fixed chunking at 300 tokens / 15%
+  overlap.
 - `infra/studybot_infra/resources_observability.py`: CloudWatch
   dashboard and alarms.
 - `infra/outputs.json`: deployed resource IDs, custom domains, Knowledge

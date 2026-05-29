@@ -1,4 +1,4 @@
-from aws_cdk import CfnCondition, CfnOutput, CfnParameter, Fn, Stack
+from aws_cdk import CfnCondition, CfnOutput, CfnParameter, Fn, Stack, Tags
 from constructs import Construct
 
 from .config import (
@@ -23,6 +23,12 @@ from .resources_storage import create_storage_resources
 class StudyBotInfraStack(Stack):
     def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
+
+        tag_options = {"exclude_resource_types": ["AWS::CloudFormation::CustomResource"]}
+        Tags.of(self).add("Project", "W7Capstone", **tag_options)
+        Tags.of(self).add("Team", "G11", **tag_options)
+        Tags.of(self).add("Owner", "DinhDanhNam", **tag_options)
+        Tags.of(self).add("Environment", "hackathon", **tag_options)
 
         root_domain_name = ROOT_DOMAIN_NAME
         api_domain_name = f"{API_SUBDOMAIN}.{root_domain_name}"
