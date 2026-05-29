@@ -145,6 +145,20 @@ still `OK`. This gives the project a double layer of warning: AWS
 Budgets controls spend, while CloudWatch alarms monitor StudyBot runtime
 health.
 
+![Figure 26. Cost Explorer evidence for the W7 project
+window.](figures/fig-26-cost-explorer.png)
+
+**Figure 26. Cost Explorer evidence.** Cost Explorer is used as the
+available billing evidence for the W7 project window and shows the AWS
+service spend view used for cost review.
+
+![Figure 27. Cost allocation tag activation for W7
+tags.](figures/fig-27-cost-allocation-tag.png)
+
+**Figure 27. Cost allocation tag activation.** The W7 project tags are
+available for cost allocation, supporting filtered cost review by tags
+such as `Project`, `Team`, `Owner`, and `Environment`.
+
 ### 4.4 Cost Anomaly Detection
 
 Advanced Cost Insights is the selected optional capability. Account-level
@@ -156,11 +170,10 @@ confirmed email alerts to `dinhdanhnam1@gmail.com` when both absolute
 impact is at least USD 100 and percentage impact is at least 40%.
 
 Cost Explorer evidence was checked from the AWS CLI on
-`2026-05-28T18:53Z` UTC. Historical Wednesday/Thursday/Friday screenshots
-were not available in this repository, so the available evidence is the
-current Cost Explorer/Budgets/Anomaly state plus the live CLI values:
-the W7 budget shows actual spend USD 57.289 and forecast spend USD
-58.837 for May 27 to June 4, 2026.
+`2026-05-28T18:53Z` UTC and supplemented with the Cost Explorer and cost
+allocation tag screenshots in Figures 26 and 27. The W7 budget shows
+actual spend USD 57.289 and forecast spend USD 58.837 for May 27 to
+June 4, 2026.
 
 ### 4.5 Cost Per Feature
 
