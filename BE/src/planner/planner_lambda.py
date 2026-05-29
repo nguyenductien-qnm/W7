@@ -105,6 +105,18 @@ def _parse_planner_prompt_deterministic(text):
     weak_topics = re.search(r"weak topics?\s*:\s*([^.;]+)", prompt, re.IGNORECASE)
     excluded_days = re.search(r"(?:exclude|excluded days?)\s*:\s*([^.;]+)", prompt, re.IGNORECASE)
     target_grade = re.search(r"(?:target grade|goal)\s*:\s*([^.;]+)", prompt, re.IGNORECASE)
+    target_exam_prefix = re.search(
+        r"\b([A-Za-z][A-Za-z0-9&+\- ]{2,60}?\s+(?:exam|test|midterm|final))\s+(?:on|by|at)\s+20\d{2}-\d{2}-\d{2}\b",
+        prompt,
+        re.IGNORECASE,
+    )
+    target_exam = target_exam_prefix or re.search(
+        r"(?:exam|test|midterm|final)\s*(?:is\s*)?(?:on|for|about|covers?|covering|topic:?)\s*([^.;,\n]+)",
+        prompt,
+        re.IGNORECASE,
+    )
+    if not target_exam:
+        target_exam = re.search(r"(?:subject|course|exam topic)\s*:\s*([^.;,\n]+)", prompt, re.IGNORECASE)
     parsed = {}
     if exam_date:
         parsed["exam_date"] = exam_date.group(1)
@@ -122,6 +134,10 @@ def _parse_planner_prompt_deterministic(text):
         parsed["excluded_days"] = [item.strip() for item in excluded_days.group(1).split(",") if item.strip()]
     if target_grade:
         parsed["target_grade"] = target_grade.group(1).strip()
+    if target_exam:
+        target_exam_text = target_exam.group(1).strip()
+        if not _parse_date(target_exam_text):
+            parsed["target_exam"] = target_exam_text
     return parsed
 
 
@@ -284,9 +300,13 @@ def _validate_and_normalize_planner_payload(payload, require_fields=True):
     for key in ("target_grade", "target_exam"):
         if normalized.get(key) is not None:
             normalized[key] = str(normalized.get(key)).strip()
+    if not normalized.get("target_exam") and normalized.get("exam_subject"):
+        normalized["target_exam"] = str(normalized.get("exam_subject")).strip()
 
     missing_required = []
     if require_fields:
+        if not normalized.get("target_exam"):
+            missing_required.append("target_exam")
         if not exam_date and "exam_date" not in errors:
             missing_required.append("exam_date")
         if daily is None and weekly is None and "daily_study_hours" not in errors and "weekly_study_hours" not in errors:
@@ -305,8 +325,16 @@ def _clarification_question(missing_required, field_errors):
         if "preferred_session_length" in field_errors:
             labels.append("preferred session length in minutes")
         return f"Please send {', '.join(labels)}."
+    if {"target_exam", "exam_date", "study_hours"}.issubset(set(missing_required)):
+        return "What exam or subject is this for, what is the exam date, and how many hours can you study per day or per week?"
+    if "target_exam" in missing_required and "exam_date" in missing_required:
+        return "What exam or subject is this for, and what is the exam date? Please use YYYY-MM-DD for the date."
+    if "target_exam" in missing_required and "study_hours" in missing_required:
+        return "What exam or subject is this for, and how many hours can you study per day or per week?"
     if "exam_date" in missing_required and "study_hours" in missing_required:
         return "What is your exam date, and how many hours can you study per day or per week?"
+    if "target_exam" in missing_required:
+        return "What exam or subject is this study plan for?"
     if "exam_date" in missing_required:
         return "What is the exam date? Please use YYYY-MM-DD."
     if "study_hours" in missing_required:

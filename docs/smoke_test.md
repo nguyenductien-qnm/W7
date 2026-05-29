@@ -74,7 +74,7 @@ Invoke-RestMethod "$api/quiz" -Method POST -Headers $headers -Body (@{
 } | ConvertTo-Json)
 ```
 
-8. Planner clarification returns `ready:false` when required fields are missing:
+8. Planner clarification returns `ready:false` when exam/subject, date, or hours are missing:
 
 ```powershell
 Invoke-RestMethod "$api/planner/clarify" -Method POST -Headers $headers -Body (@{
@@ -84,13 +84,14 @@ Invoke-RestMethod "$api/planner/clarify" -Method POST -Headers $headers -Body (@
 } | ConvertTo-Json)
 ```
 
-9. Planner create succeeds with date and hours:
+9. Planner create succeeds with exam/subject, date, and hours:
 
 ```powershell
 Invoke-RestMethod "$api/planner" -Method POST -Headers $headers -Body (@{
   user_id = $user
   session_id = $session
   selected_doc_ids = @("w7-demo-photosynthesis")
+  target_exam = "AWS exam"
   exam_date = "2026-06-20"
   daily_study_hours = 2
   weak_topics = @("CAP theorem", "Replication")

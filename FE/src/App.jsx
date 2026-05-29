@@ -11,7 +11,7 @@ const FEATURES = {
   summary: { label: "Summary", placeholder: "Summarize the selected documents..." },
   quiz: { label: "Quiz", placeholder: "Quiz me on the selected documents..." },
   flashcards: { label: "Flash Cards", placeholder: "Create review cards from the selected documents..." },
-  planning: { label: "Exam Planner", placeholder: "Exam date and hours, e.g. 2026-06-20, 2 hours daily..." },
+  planning: { label: "Exam Planner", placeholder: "Exam subject, date, and hours, e.g. AWS exam on 2026-06-20, 2 hours daily..." },
 };
 
 const FEATURE_MENU = [
@@ -275,6 +275,10 @@ function parsePlannerPrompt(prompt) {
   const weakTopics = text.match(/weak topics?\s*:\s*([^.;]+)/i)?.[1];
   const excludedDays = text.match(/(?:exclude|excluded days?)\s*:\s*([^.;]+)/i)?.[1];
   const targetGrade = text.match(/(?:target grade|goal)\s*:\s*([^.;]+)/i)?.[1]?.trim();
+  const targetExam =
+    text.match(/\b([A-Za-z][A-Za-z0-9&+\- ]{2,60}?\s+(?:exam|test|midterm|final))\s+(?:on|by|at)\s+20\d{2}-\d{2}-\d{2}\b/i)?.[1]?.trim() ||
+    text.match(/(?:exam|test|midterm|final)\s*(?:is\s*)?(?:on|for|about|covers?|covering|topic:?)\s*([^.;,\n]+)/i)?.[1]?.trim() ||
+    text.match(/(?:subject|course|exam topic)\s*:\s*([^.;,\n]+)/i)?.[1]?.trim();
   return {
     exam_date: examDate,
     daily_study_hours: daily ? Number(daily[1]) : !weekly && genericHours ? Number(genericHours[1]) : undefined,
@@ -283,6 +287,7 @@ function parsePlannerPrompt(prompt) {
     weak_topics: weakTopics ? weakTopics.split(",").map((item) => item.trim()).filter(Boolean) : undefined,
     excluded_days: excludedDays ? excludedDays.split(",").map((item) => item.trim()).filter(Boolean) : undefined,
     target_grade: targetGrade,
+    target_exam: targetExam,
   };
 }
 
@@ -295,6 +300,7 @@ function blankPlanForm() {
     preferred_session_length: "60",
     weak_topics: "",
     excluded_days: "",
+    target_exam: "",
     target_grade: "",
   };
 }
@@ -725,6 +731,7 @@ export default function App() {
         : parsedPrompt.preferred_session_length,
       weak_topics: weakTopics.length ? weakTopics : parsedPrompt.weak_topics,
       excluded_days: excludedDays.length ? excludedDays : parsedPrompt.excluded_days,
+      target_exam: planForm.target_exam || parsedPrompt.target_exam || undefined,
       target_grade: planForm.target_grade || parsedPrompt.target_grade || undefined,
       user_id: currentUserId,
       session_id: activeSessionId,
@@ -749,6 +756,9 @@ export default function App() {
     const errors = {};
     if (!String(planForm.exam_date || "").trim()) {
       errors.exam_date = "Exam date is required.";
+    }
+    if (!String(planForm.target_exam || "").trim()) {
+      errors.target_exam = "Exam or subject is required.";
     }
     const dailyText = String(planForm.daily_study_hours || "").trim();
     const weeklyText = String(planForm.weekly_study_hours || "").trim();
@@ -819,7 +829,8 @@ export default function App() {
       preferred_session_length: plan.preferred_session_length ?? "60",
       weak_topics: safeArray(plan.weak_topics).join(", "),
       excluded_days: safeArray(plan.excluded_days).join(", "),
-      target_grade: plan.target_grade || plan.target_exam || "",
+      target_exam: plan.target_exam || "",
+      target_grade: plan.target_grade || "",
     });
     setPlanModalOpen(true);
   }
@@ -1807,7 +1818,7 @@ export default function App() {
             <div className="modal-head">
               <div>
                 <h2>{editingPlanId ? "Edit Plan" : "Add Plan"}</h2>
-                <p>Exam date and either daily or weekly study hours are required.</p>
+                <p>Exam subject, exam date, and either daily or weekly study hours are required.</p>
               </div>
               <button className="icon-btn" type="button" onClick={cancelPlanEdit}>
                 x
@@ -1882,14 +1893,23 @@ export default function App() {
                 />
               </label>
               <label className="form-field">
-                <span>Target grade/exam</span>
+                <span>Exam / subject</span>
+                <input
+                  value={planForm.target_exam}
+                  onChange={(event) => setPlanForm((prev) => ({ ...prev, target_exam: event.target.value }))}
+                  placeholder="AWS Cloud Practitioner, Biology final"
+                />
+                {planFormErrors.target_exam ? <small>{planFormErrors.target_exam}</small> : null}
+              </label>
+            </div>
+            <label className="form-field wide">
+                <span>Target grade</span>
                 <input
                   value={planForm.target_grade}
                   onChange={(event) => setPlanForm((prev) => ({ ...prev, target_grade: event.target.value }))}
-                  placeholder="A, final exam"
+                  placeholder="A, pass, 85%"
                 />
               </label>
-            </div>
             <div className="modal-actions">
               <button type="button" onClick={cancelPlanEdit}>
                 Cancel
