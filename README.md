@@ -15,6 +15,8 @@ Knowledge Base, S3 Vectors, and CloudWatch.
 ## Submission Artifacts
 
 - Graded evidence pack: [evidence_pack/W7.md](evidence_pack/W7.md)
+- Demo slides: [evidence_pack/slides.pdf](evidence_pack/slides.pdf)
+- Demo video / shared submission folder: <https://drive.google.com/drive/folders/1pABN9MzRu9GUgXRD9KjNippjSlHP2rkZ?usp=sharing>
 - Architecture: [docs/architecture.md](docs/architecture.md)
 - Smoke test commands: [docs/smoke_test.md](docs/smoke_test.md)
 - Stack status: [docs/aws_stack_status.md](docs/aws_stack_status.md)
