@@ -14,7 +14,7 @@ Knowledge Base, S3 Vectors, and CloudWatch.
 
 ## Submission Artifacts
 
-- Graded evidence pack: [docs/W7_evidence.md](docs/W7_evidence.md)
+- Graded evidence pack: [evidence_pack/W7.md](evidence_pack/W7.md)
 - Architecture: [docs/architecture.md](docs/architecture.md)
 - Smoke test commands: [docs/smoke_test.md](docs/smoke_test.md)
 - Stack status: [docs/aws_stack_status.md](docs/aws_stack_status.md)
@@ -48,7 +48,7 @@ planner clarification, planner creation, dashboard, and frontend HTTP
 The chosen optional capability is Advanced Cost Insights. Evidence uses
 AWS Budgets budget `StudyBot-W7-weekly-safety-net`, Cost Anomaly
 Detection monitor `Default-Services-Monitor`, and a cost-per-feature
-breakdown in [docs/W7_evidence.md](docs/W7_evidence.md).
+breakdown in [evidence_pack/W7.md](evidence_pack/W7.md).
 
 ## Teardown
 
